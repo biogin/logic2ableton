@@ -186,6 +186,7 @@ class AbletonAudioClip:
     source_issue: str | None = None
     source_in_seconds: float | None = None  # Source-file coordinate, independent of project tempo
     output_channel: int | None = None  # Split-mono source: 0 left, 1 right in stereo exports
+    gain_linear: float = 1.0  # Live's SampleVolume, before the track fader
 
     @property
     def duration_beats(self) -> float:
@@ -193,9 +194,35 @@ class AbletonAudioClip:
 
 
 @dataclass
+class AbletonMixerState:
+    volume_linear: float = 1.0
+    pan: float = 0.0
+    is_muted: bool = False
+    is_soloed: bool = False
+    muted_by_groups: list[str] = field(default_factory=list)
+    automation_parameters: list[str] = field(default_factory=list)
+
+    @property
+    def render_gain(self) -> float:
+        return 0.0 if self.is_muted or self.muted_by_groups else self.volume_linear
+
+
+@dataclass
+class AbletonGroup:
+    track_id: str
+    name: str
+    parent_id: str | None
+    output_routing: str
+    mixer: AbletonMixerState = field(default_factory=AbletonMixerState)
+
+
+@dataclass
 class AbletonTrack:
     name: str
     clips: list[AbletonAudioClip] = field(default_factory=list)
+    mixer: AbletonMixerState = field(default_factory=AbletonMixerState)
+    group_id: str | None = None
+    output_routing: str = ""
 
 
 @dataclass
@@ -226,6 +253,9 @@ class AbletonMidiClip:
 class AbletonMidiTrack:
     name: str
     clips: list[AbletonMidiClip] = field(default_factory=list)
+    mixer: AbletonMixerState = field(default_factory=AbletonMixerState)
+    group_id: str | None = None
+    output_routing: str = ""
 
     @property
     def notes(self) -> list[AbletonMidiNote]:
@@ -246,6 +276,7 @@ class AbletonProject:
     locators: list[AbletonLocator]
     midi_tracks: list[AbletonMidiTrack] = field(default_factory=list)
     compatibility_warnings: list[str] = field(default_factory=list)
+    groups: list[AbletonGroup] = field(default_factory=list)
 
     @property
     def clips(self) -> list[AbletonAudioClip]:

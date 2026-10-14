@@ -8,16 +8,18 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from logic2ableton.audio import AUDIO_SUFFIXES
-from logic2ableton.ableton_metadata import decode_meter, has_global_changes, read_global_parameter
+from logic2ableton.ableton_metadata import decode_meter, has_global_changes, parameter_events, read_global_parameter
 from logic2ableton.limits import ExpansionBudget, read_session_bytes
 from logic2ableton.paths import contained_source_path
 
 from logic2ableton.models import (
     AbletonAudioClip,
+    AbletonGroup,
     AbletonLocator,
     AbletonMidiClip,
     AbletonMidiNote,
     AbletonMidiTrack,
+    AbletonMixerState,
     AbletonProject,
     AbletonTrack,
 )
@@ -218,6 +220,9 @@ def _parse_clip(
             if source_start <= right[0]:
                 break
     source_in_beats = source_start if is_warped else source_in_seconds * tempo / 60
+    gain_linear = _float_value(clip.find("SampleVolume"), 1.0)
+    if gain_linear < 0:
+        raise ValueError("Negative clip gain in Live Set")
 
     return AbletonAudioClip(
         clip_name=clip_name,
@@ -231,7 +236,72 @@ def _parse_clip(
         is_warped=is_warped,
         is_disabled=_bool_value(clip.find("Disabled")),
         source_issue=source_issue,
+        gain_linear=gain_linear,
     )
+
+
+def _parse_mixer(track: ET.Element) -> AbletonMixerState:
+    mixer = AbletonMixerState(
+        volume_linear=_float_value(track.find("DeviceChain/Mixer/Volume/Manual"), 1.0),
+        pan=_float_value(track.find("DeviceChain/Mixer/Pan/Manual"), 0.0),
+        is_muted=not _bool_value(track.find("DeviceChain/Mixer/Speaker/Manual"), True),
+        is_soloed=_bool_value(track.find("DeviceChain/Mixer/SoloSink")),
+    )
+    if mixer.volume_linear < 0:
+        raise ValueError("Negative volume in Live Set")
+    for name, manual in (("Speaker", float(not mixer.is_muted)), ("Volume", mixer.volume_linear), ("Pan", mixer.pan)):
+        parameter = track.find(f"DeviceChain/Mixer/{name}")
+        if parameter is None:
+            continue
+        events = parameter_events(track, parameter)
+        if any((float(_bool_value(event)) if name == "Speaker" else _float_attr(event, "Value", manual)) != manual
+               for event in events):
+            mixer.automation_parameters.append(name)
+    return mixer
+
+
+def _group_id(track: ET.Element) -> str | None:
+    value = _value(track.find("TrackGroupId"), "-1")
+    return None if value == "-1" else value
+
+
+def _parse_groups(live_set: ET.Element) -> list[AbletonGroup]:
+    groups = [AbletonGroup(
+        track_id=track.get("Id", ""),
+        name=_value(track.find("Name/EffectiveName"), "Group Track"),
+        parent_id=_group_id(track),
+        output_routing=_value(track.find("DeviceChain/AudioOutputRouting/Target")),
+        mixer=_parse_mixer(track),
+    ) for track in live_set.findall(".//Tracks/GroupTrack")]
+    by_id = {group.track_id: group for group in groups}
+    if "" in by_id or len(by_id) != len(groups):
+        raise ValueError("Missing or duplicate Live group track ID")
+    checked: set[str] = set()
+    for group in groups:
+        chain: set[str] = set()
+        parent = group.track_id
+        while parent in by_id and parent not in checked:
+            if parent in chain:
+                raise ValueError("Live group ancestry cycle")
+            chain.add(parent)
+            parent = by_id[parent].parent_id
+        checked.update(chain)
+    return groups
+
+
+def _inherit_group_mutes(project: AbletonProject) -> None:
+    groups = {group.track_id: group for group in project.groups}
+    budget = ExpansionBudget("Ableton group routing")
+    budget.add_items(len(groups))
+    for track in [*project.audio_tracks, *project.midi_tracks]:
+        parent, routing = track.group_id, track.output_routing
+        while parent in groups and routing in ("", "AudioOut/GroupTrack"):
+            budget.reserve_work(1)
+            group = groups[parent]
+            if group.mixer.is_muted:
+                budget.add_items()
+                track.mixer.muted_by_groups.append(group.track_id)
+            parent, routing = group.parent_id, group.output_routing
 
 
 def _parse_audio_tracks(live_set: ET.Element, als_path: Path, tempo: float) -> list[AbletonTrack]:
@@ -244,7 +314,10 @@ def _parse_audio_tracks(live_set: ET.Element, als_path: Path, tempo: float) -> l
             parsed = _parse_clip(clip, als_path, track_name, tempo, source_cache)
             if parsed is not None and not parsed.is_disabled:
                 clips.append(parsed)
-        tracks.append(AbletonTrack(name=track_name, clips=clips))
+        tracks.append(AbletonTrack(
+            name=track_name, clips=clips, mixer=_parse_mixer(track), group_id=_group_id(track),
+            output_routing=_value(track.find("DeviceChain/AudioOutputRouting/Target")),
+        ))
     return tracks
 
 
@@ -384,13 +457,73 @@ def _parse_midi_tracks(live_set: ET.Element, tempo: float) -> list[AbletonMidiTr
             parsed = _parse_midi_clip(clip, track_name, tempo, budget)
             if parsed is not None and not parsed.is_disabled:
                 clips.append(parsed)
-        tracks.append(AbletonMidiTrack(name=track_name, clips=clips))
+        tracks.append(AbletonMidiTrack(
+            name=track_name, clips=clips, mixer=_parse_mixer(track), group_id=_group_id(track),
+            output_routing=_value(track.find("DeviceChain/AudioOutputRouting/Target")),
+        ))
     return tracks
 
 
 def _build_compatibility_warnings(project: AbletonProject) -> list[str]:
     warnings: list[str] = []
     clips = project.clips
+    groups = {group.track_id: group for group in project.groups}
+    for track in [*project.audio_tracks, *project.midi_tracks]:
+        midi = isinstance(track, AbletonMidiTrack)
+        if track.mixer.is_muted or track.mixer.muted_by_groups:
+            group_names = ", ".join(groups[group_id].name for group_id in track.mixer.muted_by_groups)
+            warnings.append(
+                f"Track '{track.name}' is muted"
+                + (f" by group(s) {group_names}. " if group_names else ". ")
+                + ("Its MIDI file retains notes without mute; mute the destination track after import."
+                   if midi else "Rendered audio is silent; undecodable source files are not copied.")
+            )
+        if track.group_id is not None:
+            if track.group_id not in groups:
+                warnings.append(f"Track '{track.name}' references missing group {track.group_id}; group mute could not be resolved.")
+            elif track.output_routing not in ("", "AudioOut/GroupTrack"):
+                warnings.append(
+                    f"Track '{track.name}' routing '{track.output_routing}' bypasses its parent group mixer; recreate routing after import."
+                )
+            elif not track.output_routing:
+                warnings.append(f"Track '{track.name}' has no saved output routing; group output is inferred from membership. Verify its routing in Live.")
+        if track.output_routing not in ("", "AudioOut/Main", "AudioOut/Master", "AudioOut/GroupTrack"):
+            warnings.append(f"Track '{track.name}' output routing '{track.output_routing}' is retained in the manifest but is not rebuilt.")
+        if track.mixer.pan != 0:
+            warnings.append(
+                f"Track '{track.name}' has pan {track.mixer.pan:g}; pan is retained in the manifest "
+                "and must be recreated in the destination DAW."
+            )
+        if midi and track.mixer.volume_linear != 1:
+            warnings.append(
+                f"MIDI track '{track.name}' has volume {track.mixer.volume_linear:g}; "
+                "the MIDI file carries notes without audio gain. Recreate its volume after import."
+            )
+        if track.mixer.automation_parameters:
+            warnings.append(
+                f"Track '{track.name}' has mixer automation ({', '.join(track.mixer.automation_parameters)}). "
+                "Only the saved Manual snapshot is used; recreate automation in the destination DAW."
+            )
+    for group in project.groups:
+        if group.mixer.volume_linear != 1 or group.mixer.pan != 0 or group.mixer.automation_parameters:
+            warnings.append(
+                f"Group '{group.name}' volume, pan and mixer automation are retained in the manifest but not rendered; "
+                "only its saved mute is applied to children routed through it. Recreate the group mixer in the destination DAW."
+            )
+        if group.parent_id is not None and group.output_routing not in ("", "AudioOut/GroupTrack"):
+            warnings.append(f"Group '{group.name}' routing '{group.output_routing}' bypasses its parent group mixer; recreate routing after import.")
+        elif group.parent_id is not None and not group.output_routing:
+            warnings.append(f"Group '{group.name}' has no saved output routing; parent group output is inferred from membership. Verify its routing in Live.")
+        if group.parent_id is not None and group.parent_id not in groups:
+            warnings.append(f"Group '{group.name}' references missing parent group {group.parent_id}; ancestor mute could not be resolved.")
+        if group.output_routing not in ("", "AudioOut/Main", "AudioOut/Master", "AudioOut/GroupTrack"):
+            warnings.append(f"Group '{group.name}' output routing '{group.output_routing}' is retained in the manifest but is not rebuilt.")
+    soloed = [track.name for track in [*project.audio_tracks, *project.midi_tracks, *project.groups] if track.mixer.is_soloed]
+    if soloed:
+        warnings.append(
+            f"Solo state ({', '.join(soloed)}) is retained in the manifest but not applied; "
+            "exports can include tracks silenced by solo in Live. Recreate solo state after import."
+        )
     if not project.audio_tracks and not project.midi_tracks:
         warnings.append("No Ableton audio or MIDI tracks were found in the Live Set.")
         return warnings
@@ -454,7 +587,9 @@ def parse_ableton_project(als_path: Path) -> AbletonProject:
         audio_tracks=_parse_audio_tracks(live_set, als_path, tempo),
         locators=_parse_locators(live_set),
         midi_tracks=_parse_midi_tracks(live_set, tempo),
+        groups=_parse_groups(live_set),
     )
+    _inherit_group_mutes(project)
     project.compatibility_warnings = _build_compatibility_warnings(project)
     for parameter in ("Tempo", "TimeSignature"):
         if has_global_changes(live_set, parameter):

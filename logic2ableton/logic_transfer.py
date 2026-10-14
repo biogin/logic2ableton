@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import shutil
 import struct
-from dataclasses import dataclass
+import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from collections.abc import Iterable, Iterator
 
@@ -111,6 +113,13 @@ def _clip_rows(project: AbletonProject) -> list[dict[str, object]]:
                     "source_in_beats": round(clip.source_in_beats, 6),
                     "source_in_seconds": clip.source_in_seconds,
                     "output_channel": clip.output_channel,
+                    "gain_linear": clip.gain_linear,
+                    "track_volume_linear": track.mixer.volume_linear,
+                    "track_is_muted": track.mixer.is_muted,
+                    "track_pan": track.mixer.pan,
+                    "group_id": track.group_id,
+                    "output_routing": track.output_routing,
+                    "muted_by_groups": ",".join(track.mixer.muted_by_groups),
                     "is_warped": clip.is_warped,
                     "source_issue": clip.source_issue or "",
                     "relative_source_path": clip.relative_source_path or "",
@@ -199,6 +208,7 @@ def _render_clip_pcm(
     start_frame: int = 0,
     frame_count: int | None = None,
     out_encoding: str = "pcm",
+    track_gain: float = 1.0,
 ) -> bytes | None:
     if clip.source_path is None or not clip.source_path.exists():
         return None
@@ -222,9 +232,26 @@ def _render_clip_pcm(
     target_frame_count = max(0, target_frame_count - start_frame)
     if frame_count is not None:
         target_frame_count = min(target_frame_count, frame_count)
+    gain = _clip_render_gain(clip, track_gain)
+    if gain == 0:
+        silence = b"\x80" if out_width == 1 else b"\x00"
+        return silence * (target_frame_count * out_width * out_channels)
     raw_frames = _slice_frames(decoded, source_start_frame + start_frame, target_frame_count)
     if out_encoding == "float":
         raw_frames = samples_as_float(raw_frames, decoded.sample_width, decoded.encoding, out_width)
+        if gain != 1:
+            code = f"<{len(raw_frames) // out_width}{'f' if out_width == 4 else 'd'}"
+            scaled_samples = []
+            for value in struct.unpack(code, raw_frames):
+                scaled = value * gain
+                if math.isfinite(value) and not math.isfinite(scaled):
+                    # Preserve pack_float's representable-range clamp even
+                    # when finite operands overflow Python's float first.
+                    scaled = math.copysign(sys.float_info.max, value)
+                scaled_samples.append(scaled)
+            raw_frames = pack_float(scaled_samples, out_width)
+    elif gain != 1:
+        return None
     if clip.output_channel is not None:
         raw_frames = place_mono_channel(raw_frames, out_width, clip.output_channel)
     return _fit_to_frame_count(raw_frames, out_width, out_channels, target_frame_count)
@@ -241,19 +268,34 @@ def _clip_render_channels(clip: AbletonAudioClip, decoded: DecodedAudio) -> int:
 def _iter_clip_pcm(
     clip: AbletonAudioClip, decoded: DecodedAudio, *, tempo: float,
     cache: dict[Path, DecodedAudio | None],
+    track_gain: float = 1.0,
 ) -> Iterator[bytes]:
     count = max(1, _beats_to_frames(clip.duration_beats, tempo, decoded.frame_rate))
-    width, encoding = export_format(decoded)
+    width, encoding = _clip_export_format(clip, decoded, track_gain)
     for start in range(0, count, BLOCK_FRAMES):
         block = _render_clip_pcm(
             clip, tempo=tempo, out_rate=decoded.frame_rate, out_channels=_clip_render_channels(clip, decoded),
             out_width=width, cache=cache, start_frame=start,
             frame_count=min(BLOCK_FRAMES, count - start),
             out_encoding=encoding,
+            track_gain=track_gain,
         )
         if block is None:
             raise ValueError(f"Source audio became unavailable: {clip.clip_name}")
         yield block
+
+
+def _clip_render_gain(clip: AbletonAudioClip, track_gain: float) -> float:
+    gain = track_gain * clip.gain_linear
+    if not math.isfinite(gain):
+        raise ValueError(f"Non-finite combined audio gain for clip '{clip.clip_name}'")
+    return gain
+
+
+def _clip_export_format(clip: AbletonAudioClip, decoded: DecodedAudio, track_gain: float) -> tuple[int, str]:
+    if _clip_render_gain(clip, track_gain) != 1:
+        return FLOAT_EXPORT_WIDTH, "float"
+    return export_format(decoded)
 
 
 def _write_wav_with_bext(
@@ -308,7 +350,7 @@ def _track_render_format(
     if len(clocks) != 1:
         return None
     rate, channels = next(iter(clocks))
-    formats = {export_format(audio) for _, audio in available}
+    formats = {_clip_export_format(clip, audio, track.mixer.render_gain) for clip, audio in available}
     # Overlap is judged in frames, as the stem places clips: butted clips whose
     # beat positions differ by rounding do not mix.
     end = -1
@@ -316,7 +358,8 @@ def _track_render_format(
     for clip, _ in sorted(available, key=lambda item: item[0].start_beats):
         overlaps |= _beats_to_frames(clip.start_beats, tempo, rate) < end
         end = max(end, _beats_to_frames(clip.end_beats, tempo, rate))
-    if overlaps or (len(formats) > 1 and any(encoding == "float" for _, encoding in formats)):
+    if (overlaps or track.mixer.render_gain != 1 or any(clip.gain_linear != 1 for clip, _ in available)
+            or (len(formats) > 1 and any(encoding == "float" for _, encoding in formats))):
         # A float mix keeps its headroom; 32-bit integer sources keep 24 bits.
         return rate, channels, FLOAT_EXPORT_WIDTH, "float"
     if len(formats) != 1:
@@ -365,6 +408,7 @@ def _render_track_stem(
                     out_width=sample_width, cache=cache,
                     start_frame=start - clip_start, frame_count=end - start,
                     out_encoding=encoding,
+                    track_gain=track.mixer.render_gain,
                 )
                 if rendered is None:
                     raise ValueError(f"Source audio became unavailable: {clip.clip_name}")
@@ -392,6 +436,7 @@ def _render_clip_export(
     *,
     tempo: float,
     cache: dict[Path, DecodedAudio | None],
+    track_gain: float = 1.0,
 ) -> tuple[str, int | None, Path]:
     """Render (or fall back to copying) one clip export.
 
@@ -406,15 +451,18 @@ def _render_clip_export(
     if clip.source_path is None or not clip.source_path.exists():
         return "reference-only", None, _stem_with_extension(destination_stem, ".wav")
 
+    gain = _clip_render_gain(clip, track_gain)
     decoded = _read_decoded_audio(clip.source_path, cache)
     if decoded is None:
+        if gain == 0:
+            return "muted-reference-only", None, _stem_with_extension(destination_stem, ".wav")
         destination = _stem_with_extension(destination_stem, clip.source_path.suffix or ".wav")
         shutil.copy2(clip.source_path, destination)
         return "copied-source", None, destination
 
     destination = _stem_with_extension(destination_stem, ".wav")
-    rendered = _iter_clip_pcm(clip, decoded, tempo=tempo, cache=cache)
-    width, encoding = export_format(decoded)
+    rendered = _iter_clip_pcm(clip, decoded, tempo=tempo, cache=cache, track_gain=track_gain)
+    width, encoding = _clip_export_format(clip, decoded, track_gain)
 
     time_reference = _beats_to_frames(clip.start_beats, tempo, decoded.frame_rate)
     _write_wav_with_bext(
@@ -540,6 +588,10 @@ def build_logic_import_guide(project: AbletonProject) -> str:
         f"{project.time_sig_numerator}/{project.time_sig_denominator}.",
         "- Warped clips are exported with best-effort timing, but they should be reviewed in Logic before delivery.",
         "- Copied source files that are not rendered as timestamped WAVs are called out in the report and manifest.",
+        "- Audio renders include static track volume, clip gain, and mute. Keep destination faders at unity to avoid applying gain twice.",
+        "- Recreate pan from the manifest and mixer automation from the Live Set; rendered audio uses the saved mixer snapshot.",
+        "- Copied source references retain raw gain and require mixer settings from the manifest. Silent undecodable sources are not copied.",
+        "- MIDI files retain notes without mixer settings; mute muted MIDI tracks after import.",
     ]
     if has_midi:
         lines.append("- MIDI note data transfers, but instruments, devices, and MIDI effects do not — reload those in Logic.")
@@ -618,13 +670,15 @@ def generate_logic_transfer(
                     track_dir / _clip_export_stem(clip_index, clip),
                     tempo=project.tempo,
                     cache=decode_cache,
+                    track_gain=track.mixer.render_gain,
                 )
                 export_name = exported_path.name
-                if export_mode != "reference-only":
+                if export_mode not in ("reference-only", "muted-reference-only"):
                     copied_audio_files += 1
                 if export_mode == "copied-source":
                     project.compatibility_warnings.append(
                         f"Clip '{clip.clip_name}' was copied without PCM rendering; recreate its trim and placement manually."
+                        + " Track mute, volume and clip gain are not baked into this raw source reference."
                         + (f" Pan this mono source fully {('left', 'right')[clip.output_channel]}."
                            if clip.output_channel is not None else "")
                     )
@@ -640,6 +694,7 @@ def generate_logic_transfer(
                     "source_in_beats": round(clip.source_in_beats, 6),
                     "source_in_seconds": clip.source_in_seconds,
                     "output_channel": clip.output_channel,
+                    "gain_linear": clip.gain_linear,
                     "is_warped": clip.is_warped,
                     "export_mode": export_mode,
                     "time_reference_samples": time_reference_samples,
@@ -652,6 +707,9 @@ def generate_logic_transfer(
             {
                 "track_index": track_index,
                 "track_name": track.name,
+                "mixer": asdict(track.mixer),
+                "group_id": track.group_id,
+                "output_routing": track.output_routing,
                 "stem_export_name": stem_name if stem_clip_count > 0 else "",
                 "stem_mode": stem_mode,
                 "stem_clip_count": stem_clip_count,
@@ -685,6 +743,9 @@ def generate_logic_transfer(
                 {
                     "track_index": midi_index,
                     "track_name": track.name,
+                    "mixer": asdict(track.mixer),
+                    "group_id": track.group_id,
+                    "output_routing": track.output_routing,
                     "midi_export_name": midi_name,
                     "clip_count": len(track.clips),
                     "note_count": track.note_count,
@@ -708,6 +769,7 @@ def generate_logic_transfer(
                 for locator in project.locators
             ],
             "tracks": manifest_tracks,
+            "groups": [asdict(group) for group in project.groups],
             "midi_tracks": manifest_midi_tracks,
         },
     )

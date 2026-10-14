@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from collections.abc import Iterable
 
@@ -16,7 +16,9 @@ from logic2ableton.logic_transfer import (
     _beats_to_frames,
     _clip_export_name,
     _clip_export_stem,
+    _clip_export_format,
     _clip_render_channels,
+    _clip_render_gain,
     _midi_track_name,
     _read_decoded_audio,
     _iter_clip_pcm,
@@ -27,6 +29,7 @@ from logic2ableton.logic_transfer import (
 from logic2ableton.models import (
     AbletonAudioClip,
     AbletonProject,
+    AbletonMidiTrack,
     AudioFileRef,
     LogicProject,
     samples_to_beats,
@@ -71,6 +74,7 @@ def _render_protools_clip_export(
     *,
     tempo: float,
     cache: dict[Path, DecodedAudio | None],
+    track_gain: float = 1.0,
 ) -> tuple[str, int | None, Path]:
     """Render one Ableton clip as a Pro Tools-ready timestamped WAV.
 
@@ -82,15 +86,18 @@ def _render_protools_clip_export(
     if clip.source_path is None or not clip.source_path.exists():
         return "reference-only", None, _stem_with_extension(destination_stem, ".wav")
 
+    gain = _clip_render_gain(clip, track_gain)
     decoded = _read_decoded_audio(clip.source_path, cache)
     if decoded is None:
+        if gain == 0:
+            return "muted-reference-only", None, _stem_with_extension(destination_stem, ".wav")
         destination = _stem_with_extension(destination_stem, clip.source_path.suffix or ".wav")
         shutil.copy2(clip.source_path, destination)
         return "copied-source", None, destination
 
     destination = _stem_with_extension(destination_stem, ".wav")
-    rendered = _iter_clip_pcm(clip, decoded, tempo=tempo, cache=cache)
-    width, encoding = export_format(decoded)
+    rendered = _iter_clip_pcm(clip, decoded, tempo=tempo, cache=cache, track_gain=track_gain)
+    width, encoding = _clip_export_format(clip, decoded, track_gain)
 
     time_reference = _beats_to_frames(clip.start_beats, tempo, decoded.frame_rate)
     _write_pt_wav_with_bext(
@@ -194,9 +201,10 @@ def _export_ableton_audio(
             if copy_audio and clip.source_path is not None and clip.source_path.exists():
                 export_mode, time_reference_samples, destination = _render_protools_clip_export(
                     clip, track_dir / _clip_export_stem(clip_index, clip), tempo=project.tempo, cache=cache,
+                    track_gain=track.mixer.render_gain,
                 )
                 export_name = destination.name
-                if export_mode != "reference-only":
+                if export_mode not in ("reference-only", "muted-reference-only"):
                     copied_audio_files += 1
                     decoded = cache.get(clip.source_path)
                     if decoded is not None:
@@ -204,6 +212,7 @@ def _export_ableton_audio(
                 if export_mode == "copied-source":
                     project.compatibility_warnings.append(
                         f"Clip '{clip.clip_name}' was copied without PCM rendering; recreate its trim and placement manually."
+                        + " Track mute, volume and clip gain are not baked into this raw source reference."
                         + (f" Pan this mono source fully {('left', 'right')[clip.output_channel]}."
                            if clip.output_channel is not None else "")
                     )
@@ -217,6 +226,7 @@ def _export_ableton_audio(
                     "duration_beats": round(clip.duration_beats, 6),
                     "source_in_seconds": clip.source_in_seconds,
                     "output_channel": clip.output_channel,
+                    "gain_linear": clip.gain_linear,
                     "is_warped": clip.is_warped,
                     "export_mode": export_mode,
                     "time_reference_samples": time_reference_samples,
@@ -228,6 +238,9 @@ def _export_ableton_audio(
             {
                 "track_index": track_index,
                 "track_name": track.name,
+                "mixer": asdict(track.mixer),
+                "group_id": track.group_id,
+                "output_routing": track.output_routing,
                 "clips": manifest_clips,
             }
         )
@@ -334,6 +347,8 @@ def _export_midi_tracks(
                 "track_name": track.name,
                 "midi_export_name": midi_name,
                 "note_count": track.note_count,
+                **({"mixer": asdict(track.mixer), "group_id": track.group_id, "output_routing": track.output_routing}
+                   if isinstance(track, AbletonMidiTrack) else {}),
             }
         )
 
@@ -446,6 +461,13 @@ def build_protools_import_guide(project: TransferProject, *, sample_rate: int | 
         "- Warped/approximated clips are best-effort and should be checked against the original.",
         "- Non-PCM sources that could not be re-rendered are copied as references and flagged in manifest.json.",
     ]
+    if isinstance(project, AbletonProject):
+        lines += [
+            "- Audio renders include static track volume, clip gain, and mute. Keep destination faders at unity to avoid applying gain twice.",
+            "- Recreate pan from the manifest and mixer automation from the Live Set; rendered audio uses the saved mixer snapshot.",
+            "- Copied source references retain raw gain and require mixer settings from the manifest. Silent undecodable sources are not copied.",
+            "- MIDI files retain notes without mixer settings; mute muted MIDI tracks after import.",
+        ]
     return "\n".join(lines)
 
 
@@ -507,6 +529,7 @@ def generate_protools_transfer(
         "session_start": "00:00:00:00",
         "compatibility_warnings": project.compatibility_warnings,
         "tracks": manifest_tracks,
+        "groups": [asdict(group) for group in project.groups],
         "midi_tracks": manifest_midi_tracks,
     }
     guide_path, report_path = _write_package_artifacts(
