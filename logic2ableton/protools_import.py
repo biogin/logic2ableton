@@ -117,8 +117,14 @@ def _resolve_audio_dir(session: ProToolsSession) -> Path:
     return session.path.parent / "Audio Files"
 
 
-def _source_audio_path(directory: Path, filename: str, warnings: list[str]) -> Path | None:
-    candidate = contained_source_path(directory, filename)
+def _source_audio_path(
+    directory: Path, filename: str, warnings: list[str], *, session_root: Path | None = None,
+) -> Path | None:
+    # Audio Files is a child of the selected session folder, not a trusted
+    # root of its own: reject a junction there before resolving or reading it.
+    if session_root is not None:
+        directory = contained_source_path(session_root, str(directory.absolute()))
+    candidate = contained_source_path(directory, filename) if directory is not None else None
     if candidate is None:
         warning = f"Blocked source audio reference outside the session folder: {filename}"
     elif candidate.suffix.lower() not in AUDIO_SUFFIXES:
@@ -178,7 +184,7 @@ def resolve_protools_media(session: ProToolsSession) -> ProToolsMediaPreflight:
             if not region.filename or region.filename in referenced:
                 continue
             referenced.add(region.filename)
-            file_path = _source_audio_path(audio_dir, region.filename, warnings)
+            file_path = _source_audio_path(audio_dir, region.filename, warnings, session_root=session.path.parent)
             if file_path is None:
                 continue
             resolved[region.filename] = file_path

@@ -12,7 +12,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from logic2ableton.paths import output_path, safe_name, unique_output_path
+from logic2ableton.paths import contained_source_path, output_path, safe_name, unique_output_path
 
 from logic2ableton import __version__
 from logic2ableton.ableton_generator import generate_als, unmatched_keep_unwarped_warnings
@@ -162,8 +162,15 @@ def _validate_logic_input(path: Path) -> str | None:
         )
     if not path.is_dir():
         return f"'{path.name}' is not a readable Logic project package."
-    has_alternatives = (path / "Alternatives").is_dir()
-    has_info = (path / "Resources" / "ProjectInformation.plist").is_file()
+    alternatives_path = contained_source_path(path, "Alternatives")
+    info_path = contained_source_path(path, "Resources/ProjectInformation.plist")
+    if alternatives_path is None or info_path is None:
+        return (
+            f"'{path.name}' contains linked project metadata. Copy Resources and Alternatives "
+            "into the project package before converting."
+        )
+    has_alternatives = alternatives_path.is_dir()
+    has_info = info_path.is_file()
     if not has_alternatives and not has_info:
         return (
             f"'{path.name}' does not look like a Logic project "

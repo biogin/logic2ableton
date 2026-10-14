@@ -3,6 +3,8 @@ import math
 import plistlib
 import re
 import struct
+from collections import deque
+from functools import cmp_to_key
 from pathlib import Path
 
 import bisect
@@ -10,6 +12,7 @@ from dataclasses import replace
 
 from logic2ableton.audio import read_audio_info
 from logic2ableton.limits import ExpansionBudget, read_session_bytes
+from logic2ableton.paths import contained_source_path
 from logic2ableton.logic_project_data import (
     PPQ,
     SEQUENCE_ORIGIN_TICKS,
@@ -41,9 +44,16 @@ from logic2ableton.timeline import (
 )
 
 
+def _project_metadata_path(logicx_path: Path, relative: str) -> Path:
+    candidate = contained_source_path(logicx_path, relative)
+    if candidate is None:
+        raise ValueError(f"Blocked project metadata path linked below the selected project folder: {relative}")
+    return candidate
+
+
 def parse_project_info(logicx_path: Path) -> dict:
     """Parse Resources/ProjectInformation.plist."""
-    plist_path = logicx_path / "Resources" / "ProjectInformation.plist"
+    plist_path = _project_metadata_path(logicx_path, "Resources/ProjectInformation.plist")
     with open(plist_path, "rb") as f:
         data = plistlib.loads(read_session_bytes(f, "Logic project information"))
     return {
@@ -57,7 +67,7 @@ def parse_project_info(logicx_path: Path) -> dict:
 
 def parse_metadata(logicx_path: Path, alternative: int = 0) -> dict:
     """Parse Alternatives/{N}/MetaData.plist."""
-    plist_path = logicx_path / "Alternatives" / f"{alternative:03d}" / "MetaData.plist"
+    plist_path = _project_metadata_path(logicx_path, f"Alternatives/{alternative:03d}/MetaData.plist")
     with open(plist_path, "rb") as f:
         data = plistlib.loads(read_session_bytes(f, "Logic project metadata"))
     # Software-instrument file references signal MIDI/instrument tracks; reverb
@@ -86,14 +96,19 @@ def discover_alternatives(logicx_path: Path) -> list[int]:
     alternative may be ``004``, not ``000``), so callers must discover what
     actually exists rather than assuming a fixed index.
     """
-    alt_dir = logicx_path / "Alternatives"
+    alt_dir = _project_metadata_path(logicx_path, "Alternatives")
     if not alt_dir.exists():
         return []
     found: list[int] = []
     for child in alt_dir.iterdir():
-        if not child.is_dir() or not child.name.isdigit():
+        if not child.name.isdigit():
             continue
-        if (child / "MetaData.plist").exists() or (child / "ProjectData").exists():
+        child = _project_metadata_path(logicx_path, f"Alternatives/{child.name}")
+        if not child.is_dir():
+            continue
+        metadata = _project_metadata_path(logicx_path, f"Alternatives/{child.name}/MetaData.plist")
+        project_data = _project_metadata_path(logicx_path, f"Alternatives/{child.name}/ProjectData")
+        if metadata.exists() or project_data.exists():
             found.append(int(child.name))
     return sorted(found)
 
@@ -138,7 +153,7 @@ def _int_to_4cc(n: int) -> str:
 
 def _read_project_data(logicx_path: Path, alternative: int = 0) -> bytes:
     """Read the ProjectData binary file. Returns empty bytes if missing."""
-    project_data_path = logicx_path / "Alternatives" / f"{alternative:03d}" / "ProjectData"
+    project_data_path = _project_metadata_path(logicx_path, f"Alternatives/{alternative:03d}/ProjectData")
     if not project_data_path.exists():
         return b""
     with open(project_data_path, "rb") as f:
@@ -319,19 +334,25 @@ def _get_audio_sample_rate(file_path: Path, default: int = 44100) -> int:
     ext = file_path.suffix.lower()
     try:
         with open(file_path, "rb") as f:
+            f.seek(0, 2)
+            actual_end = f.tell()
+            f.seek(0)
             if ext == ".wav":
                 if f.read(4) != b"RIFF":
                     return default
                 riff_size = struct.unpack("<I", f.read(4))[0]
                 if f.read(4) != b"WAVE":
                     return default
-                while f.tell() < riff_size + 8:
+                file_end = min(riff_size + 8, actual_end)
+                while f.tell() + 8 <= file_end:
                     chunk_id = f.read(4)
                     if len(chunk_id) < 4:
                         break
                     chunk_size = struct.unpack("<I", f.read(4))[0]
+                    if chunk_size > file_end - f.tell():
+                        return default
                     if chunk_id == b"fmt " and chunk_size >= 8:
-                        fmt = f.read(chunk_size)
+                        fmt = f.read(8)
                         return struct.unpack_from("<I", fmt, 4)[0]
                     f.seek(chunk_size + (chunk_size % 2), 1)
                 return default
@@ -343,15 +364,17 @@ def _get_audio_sample_rate(file_path: Path, default: int = 44100) -> int:
                 if f.read(4) not in (b"AIFF", b"AIFC"):
                     return default
 
-                file_end = form_size + 8
-                while f.tell() < file_end:
+                file_end = min(form_size + 8, actual_end)
+                while f.tell() + 8 <= file_end:
                     chunk_id = f.read(4)
                     if len(chunk_id) < 4:
                         break
                     chunk_size = struct.unpack(">I", f.read(4))[0]
                     data_start = f.tell()
+                    if chunk_size > file_end - data_start:
+                        return default
                     if chunk_id == b"COMM" and chunk_size >= 18:
-                        data = f.read(chunk_size)
+                        data = f.read(18)
                         return _decode_ieee_extended_80(data[8:18])
 
                     f.seek(data_start + chunk_size)
@@ -381,6 +404,9 @@ def _get_aiff_timestamp(file_path: Path) -> tuple[int | None, int]:
     start_offset = 0
     try:
         with open(file_path, "rb") as f:
+            f.seek(0, 2)
+            actual_end = f.tell()
+            f.seek(0)
             if f.read(4) != b"FORM":
                 return None, 0
             file_size = struct.unpack(">I", f.read(4))[0]
@@ -388,31 +414,35 @@ def _get_aiff_timestamp(file_path: Path) -> tuple[int | None, int]:
             if aiff_id not in (b"AIFF", b"AIFC"):
                 return None, 0
 
-            file_end = file_size + 8
-            while f.tell() < file_end:
+            file_end = min(file_size + 8, actual_end)
+            while f.tell() + 8 <= file_end:
                 chunk_id = f.read(4)
                 if len(chunk_id) < 4:
                     break
                 chunk_size = struct.unpack(">I", f.read(4))[0]
                 data_start = f.tell()
+                if chunk_size > file_end - data_start:
+                    break
 
                 if chunk_id == b"MARK":
-                    data = f.read(chunk_size)
-                    if len(data) >= 2:
-                        num_markers = struct.unpack(">H", data[0:2])[0]
-                        offset = 2
-                        for _ in range(num_markers):
-                            if offset + 7 > len(data):
+                    if chunk_size >= 2:
+                        num_markers = struct.unpack(">H", f.read(2))[0]
+                        marker_end = data_start + chunk_size
+                        # Marker counts are uint16; each record needs at least
+                        # eight bytes. Stream names (at most 255 bytes) instead
+                        # of allocating the declared MARK chunk.
+                        for _ in range(min(num_markers, (chunk_size - 2) // 8)):
+                            if f.tell() + 7 > marker_end:
                                 break
-                            _marker_id = struct.unpack(">H", data[offset:offset+2])[0]
-                            position = struct.unpack(">I", data[offset+2:offset+6])[0]
-                            name_len = data[offset+6]
-                            if offset + 7 + name_len > len(data):
-                                break
-                            name = data[offset+7:offset+7+name_len].decode("ascii", errors="replace")
-                            # AIFF pstrings are padded to even length.
+                            header = f.read(7)
+                            position = struct.unpack_from(">I", header, 2)[0]
+                            name_len = header[6]
                             total_name_bytes = name_len + (1 if name_len % 2 == 0 else 0)
-                            offset += 7 + total_name_bytes
+                            if total_name_bytes > marker_end - f.tell():
+                                break
+                            name = f.read(name_len).decode("ascii", errors="replace")
+                            if name_len % 2 == 0:
+                                f.seek(1, 1)
                             if name.startswith("Timestamp: "):
                                 try:
                                     timestamp = int(name.split(": ", 1)[1])
@@ -514,7 +544,7 @@ def format_smpte(seconds: float, *, fps: float = 30.0) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}:{frame:02d}"
 
 
-def resolve_audio_dir(logicx_path: Path) -> tuple[Path | None, str]:
+def resolve_audio_dir(logicx_path: Path, *, warnings: list[str] | None = None) -> tuple[Path | None, str]:
     """Locate a project's bundled audio directory and identify its layout.
 
     Package-saved Logic projects store audio under
@@ -524,17 +554,18 @@ def resolve_audio_dir(logicx_path: Path) -> tuple[Path | None, str]:
     less commonly, a sibling ``Media/Audio Files``. The package location
     wins when both exist.
     """
-    package_dir = logicx_path / "Media" / "Audio Files"
-    if package_dir.is_dir():
-        return package_dir, "package"
-
-    folder_dir = logicx_path.parent / "Audio Files"
-    if folder_dir.is_dir():
-        return folder_dir, "folder"
-
-    folder_media_dir = logicx_path.parent / "Media" / "Audio Files"
-    if folder_media_dir.is_dir():
-        return folder_media_dir, "folder"
+    for root, relative, layout in (
+        (logicx_path, "Media/Audio Files", "package"),
+        (logicx_path.parent, "Audio Files", "folder"),
+        (logicx_path.parent, "Media/Audio Files", "folder"),
+    ):
+        candidate = contained_source_path(root, relative)
+        if candidate is None:
+            warning = f"Blocked source audio directory linked below the project folder: {relative}"
+            if warnings is not None and warning not in warnings:
+                warnings.append(warning)
+        elif candidate.is_dir():
+            return candidate, layout
 
     return None, "missing"
 
@@ -542,7 +573,9 @@ def resolve_audio_dir(logicx_path: Path) -> tuple[Path | None, str]:
 _TIMESTAMPABLE_AUDIO_SUFFIXES = (".wav", ".aif", ".aiff")
 
 
-def _iter_timestamped_audio_files(audio_dir: Path, *, default_sample_rate: int = 44100):
+def _iter_timestamped_audio_files(
+    audio_dir: Path, *, default_sample_rate: int = 44100, contained_filenames: set[str] | None = None,
+):
     """Yield (audio_file, time_reference_samples, content_offset_samples, sample_rate)
     for each timestamped file in a directory.
 
@@ -550,7 +583,12 @@ def _iter_timestamped_audio_files(audio_dir: Path, *, default_sample_rate: int =
     timestamp (see _get_audio_time_reference).
     """
     for audio_file in audio_dir.iterdir():
-        if not audio_file.is_file() or audio_file.suffix.lower() not in _TIMESTAMPABLE_AUDIO_SUFFIXES:
+        if contained_filenames is not None and audio_file.name not in contained_filenames:
+            continue
+        if audio_file.suffix.lower() not in _TIMESTAMPABLE_AUDIO_SUFFIXES:
+            continue
+        audio_file = contained_source_path(audio_dir, audio_file.name)
+        if audio_file is None or not audio_file.is_file():
             continue
         time_ref = _get_audio_time_reference(audio_file)
         if time_ref is None:
@@ -582,10 +620,9 @@ def _resolve_timestamped_audio(
     if audio_dir is None or not audio_dir.is_dir():
         return []
     entries = []
-    for entry in _iter_timestamped_audio_files(audio_dir, default_sample_rate=default_sample_rate):
-        audio_file = entry[0]
-        if contained_filenames is not None and audio_file.name not in contained_filenames:
-            continue
+    for entry in _iter_timestamped_audio_files(
+        audio_dir, default_sample_rate=default_sample_rate, contained_filenames=contained_filenames,
+    ):
         entries.append(entry)
     return entries
 
@@ -661,11 +698,11 @@ def extract_regions(
             return {}
 
         # Fallback sample rate from project metadata.
-        meta_path = logicx_path / "Alternatives" / f"{alternative:03d}" / "MetaData.plist"
+        meta_path = _project_metadata_path(logicx_path, f"Alternatives/{alternative:03d}/MetaData.plist")
         sample_rate = 44100
         try:
             with open(meta_path, "rb") as f:
-                meta = plistlib.load(f)
+                meta = plistlib.loads(read_session_bytes(f, "Logic project metadata"))
             sample_rate = meta.get("SampleRate", 44100)
         except Exception:
             pass
@@ -777,33 +814,28 @@ def load_mixer_overrides(
     return overrides
 
 
-def discover_audio_files(logicx_path: Path) -> list[AudioFileRef]:
+def discover_audio_files(logicx_path: Path, *, warnings: list[str] | None = None) -> list[AudioFileRef]:
     """Discover all audio files in the project's resolved audio directory.
 
     Package-saved projects keep audio under Media/Audio Files inside the
     .logicx; folder-saved projects keep a sibling Audio Files folder. See
     resolve_audio_dir().
     """
-    audio_dir, layout = resolve_audio_dir(logicx_path)
+    audio_dir, _ = resolve_audio_dir(logicx_path, warnings=warnings)
     if audio_dir is None:
         return []
 
-    # Containment is checked against the project root, not just the audio
-    # directory itself: if audio_dir is a symlink/junction pointing outside
-    # the project, resolving against it alone would follow the link and
-    # accept whatever the attacker placed at the target.
-    project_root = (logicx_path if layout == "package" else logicx_path.parent).resolve()
-    resolved_audio_dir = audio_dir.resolve()
     refs = []
     for audio_file in sorted(audio_dir.iterdir()):
-        if not audio_file.is_file():
-            continue
-        resolved_audio_file = audio_file.resolve()
-        if not resolved_audio_file.is_relative_to(resolved_audio_dir):
-            continue
-        if not resolved_audio_file.is_relative_to(project_root):
-            continue
         if audio_file.suffix.lower() not in (".wav", ".aif", ".aiff", ".mp3", ".m4a"):
+            continue
+        resolved_audio_file = contained_source_path(audio_dir, audio_file.name)
+        if resolved_audio_file is None:
+            warning = f"Blocked source audio file linked below the project folder: {audio_file.name}"
+            if warnings is not None and warning not in warnings:
+                warnings.append(warning)
+            continue
+        if not resolved_audio_file.is_file():
             continue
         track_name, take_number, is_comp, comp_name = parse_audio_filename(audio_file.name)
         refs.append(AudioFileRef(
@@ -1158,6 +1190,7 @@ _OVERLAP_REPORT_BEATS = 0.01
 
 def _cut_overlapping_audio(
     refs: list[AudioFileRef], *, tempo_map: TempoMap, warnings: list[str],
+    budget: ExpansionBudget | None = None,
 ) -> list[AudioFileRef]:
     """Cut audio regions that overlap on one track so no two clips overlap.
 
@@ -1169,10 +1202,16 @@ def _cut_overlapping_audio(
     and a clip that can be deleted is easier to deal with than missing audio.
     Every cut is reported.
     """
+    budget = budget or ExpansionBudget("Logic audio overlap")
+    budget.reserve_work(len(refs))
     spans: list[tuple[float, float, _BeatClock]] = []
+    clocks: dict[Path, _BeatClock] = {}
     by_track: dict[str, list[int]] = {}
     for index, ref in enumerate(refs):
-        clock = _BeatClock(tempo_map, _get_audio_sample_rate(ref.file_path))
+        clock = clocks.get(ref.file_path)
+        if clock is None:
+            clock = _BeatClock(tempo_map, _get_audio_sample_rate(ref.file_path))
+            clocks[ref.file_path] = clock
         length = ref.content_duration_samples
         if length is None:
             try:
@@ -1184,35 +1223,58 @@ def _cut_overlapping_audio(
 
     pieces_by_index: dict[int, list[tuple[float, float]]] = {}
     cut: list[str] = []
+
+    def compare(left: int, right: int) -> int:
+        budget.reserve_work(1)
+        left_key, right_key = (spans[left][0], left), (spans[right][0], right)
+        return (left_key > right_key) - (left_key < right_key)
+
     for indices in by_track.values():
-        ordered = sorted(indices, key=lambda index: (spans[index][0], index))
-        for position, index in enumerate(ordered):
+        ordered = sorted(indices, key=cmp_to_key(compare))
+        # Later regions cover earlier ones, including ties in input order.
+        # Scanning backwards lets each new interval join the front of the
+        # later regions' union. Every union interval is removed once, so
+        # disjoint loop passes never visit all the passes that follow them.
+        covered: deque[tuple[float, float]] = deque()
+        track_cut: list[str] = []
+        first_later: int | None = None
+        for index in reversed(ordered):
+            budget.reserve_work(1)
             start, end, _ = spans[index]
-            pieces = [(start, end)]
-            first_later: int | None = None
-            for later in ordered[position + 1:]:
-                later_start, later_end, _ = spans[later]
-                if later_end <= later_start or later_start >= end - 1e-9:
-                    continue
-                first_later = later if first_later is None else first_later
-                remaining: list[tuple[float, float]] = []
-                for piece_start, piece_end in pieces:
-                    if later_end <= piece_start or later_start >= piece_end:
-                        remaining.append((piece_start, piece_end))
-                        continue
-                    if later_start > piece_start:
-                        remaining.append((piece_start, later_start))
-                    if later_end < piece_end:
-                        remaining.append((later_end, piece_end))
-                pieces = remaining
-            if pieces == [(start, end)]:
+            if end <= start:
+                budget.add_items()
                 continue
-            pieces_by_index[index] = pieces
-            if (end - start) - sum(piece_end - piece_start for piece_start, piece_end in pieces) >= _OVERLAP_REPORT_BEATS:
+            was_cut = bool(covered and covered[0][0] < end - 1e-9)
+            pieces: list[tuple[float, float]] = []
+            cursor, merged_end, remaining_length = start, end, 0.0
+            while covered and covered[0][0] <= merged_end:
+                budget.reserve_work(1)
+                later_start, later_end = covered.popleft()
+                if later_start < end - 1e-9:
+                    if cursor < later_start:
+                        remaining_length += later_start - cursor
+                        if later_start - cursor >= _OVERLAP_REPORT_BEATS:
+                            budget.add_items()
+                            pieces.append((cursor, later_start))
+                    cursor = max(cursor, min(end, later_end))
+                merged_end = max(merged_end, later_end)
+            covered.appendleft((start, merged_end))
+            if was_cut:
+                if cursor < end:
+                    remaining_length += end - cursor
+                    if end - cursor >= _OVERLAP_REPORT_BEATS:
+                        budget.add_items()
+                        pieces.append((cursor, end))
+                pieces_by_index[index] = pieces
+            else:
+                budget.add_items()
+            if was_cut and (end - start) - remaining_length >= _OVERLAP_REPORT_BEATS:
                 ref, later_ref = refs[index], refs[first_later]
-                cut.append(
+                track_cut.append(
                     f"{ref.track_name}: {ref.clip_name or ref.filename} under {later_ref.clip_name or later_ref.filename}"
                 )
+            first_later = index
+        cut.extend(reversed(track_cut))
 
     if not pieces_by_index:
         return refs
@@ -1774,8 +1836,9 @@ def parse_logic_project(
     info = parse_project_info(logicx_path)
     alternative = resolve_alternative(logicx_path, alternative, info.get("active_variant"))
     meta = parse_metadata(logicx_path, alternative=alternative)
-    audio_dir, audio_layout = resolve_audio_dir(logicx_path)
-    audio_files = discover_audio_files(logicx_path)
+    media_warnings: list[str] = []
+    audio_dir, audio_layout = resolve_audio_dir(logicx_path, warnings=media_warnings)
+    audio_files = discover_audio_files(logicx_path, warnings=media_warnings)
     on_disk_names = {ref.filename for ref in audio_files}
     active_names = set(meta["audio_files"])
     unused_names = set(meta["unused_audio_files"])
@@ -1899,6 +1962,7 @@ def parse_logic_project(
         if unapplied:
             compatibility_warnings.insert(0, unapplied)
     compatibility_warnings.extend(midi_warnings)
+    compatibility_warnings.extend(media_warnings)
     project_timeline = _project_timeline(arrangement if arrangement_decoded else None, tempo_changes, timeline)
 
     return LogicProject(
