@@ -95,7 +95,7 @@ The product goal is **speed with evidence**: every run emits a report showing ex
 
 ## Current Limits
 
-A session file over 1 GiB (a Live set counts at its decompressed size), or one whose loops would unroll into more than 2 million notes or clip repetitions, stops with a message instead of converting. Media that a session reaches through a symlink or junction inside its folder is not read; copy that media into the project folder first.
+A session file over 1 GiB (a Live set counts at its decompressed size), or one whose loops would unroll into more than 2 million notes or clip repetitions, stops with a message instead of converting. Project metadata and media reached through a symlink or junction inside the project folder are blocked before reading; copy those files into the project folder first.
 
 ### Logic to Ableton
 
@@ -125,6 +125,7 @@ A session file over 1 GiB (a Live set counts at its decompressed size), or one w
 - MIDI note data transfers, but instruments, devices, racks, MIDI effects, and plugin state do not — reload those in Logic
 - Looping MIDI clips are unrolled to their arrangement length, honoring the loop brace and start marker the way Live plays them (verified against Live 12.4's own Consolidate output); notes cut at a loop or clip boundary are shortened, not extended
 - Ableton devices, racks, plugin state, and return-bus processing are not transferred
+- Audio renders include saved track mute and volume plus clip gain. Muted tracks and children routed through muted groups render silence; undecodable muted sources are not copied. Keep destination track faders at unity. Recreate pan, group volume, mixer automation and solo state from the manifest and report. MIDI files retain notes and require destination mute and mixer settings after import
 - Warped clips are exported with best-effort timing, but they still need review inside Logic before delivery
 - The base tempo, meter, and markers are exported into the Logic Timeline MIDI file. Later tempo and meter changes are reported but are not reconstructed
 - Non-PCM sources that cannot be rendered to timestamped WAV in-process are copied as references and flagged in the report/manifest
@@ -136,7 +137,7 @@ A session file over 1 GiB (a Live set counts at its decompressed size), or one w
 ### Pro Tools lanes
 
 - **Session tempo is not recoverable from `.ptx` yet.** Audio positions are sample-exact regardless, but beat positions are computed at an assumed tempo (default 120 BPM, override with `--tempo`). Keep the destination set at that tempo, or pass the real session BPM
-- Plugins, inserts, sends, automation, clip gain, and fades are not transferred; crossfade renders are skipped
+- Pro Tools source plugins, inserts, sends, automation, clip gain, and fades are not transferred; crossfade renders are skipped. Ableton audio exports include saved mute, track volume, and clip gain; their pan and mixer automation still need reconstruction
 - Elastic Audio state is not reconstructed; clips reference their source audio directly
 - The source session's `Audio Files/` folder must sit next to the `.ptx` for media to be copied
 - Split-mono sources remain on separate left/right tracks. Live tracks are hard-panned; rendered transfer WAVs put each mono source in its original stereo channel. Interleaved stereo sources remain on one track
