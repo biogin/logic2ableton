@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -72,6 +73,89 @@ def test_report_shows_unresolved_track_when_plugin_has_no_mixer_attribution():
     report = generate_report(project, [match])
 
     assert "(unresolved track/slot)" in report
+
+
+def _transplantable_plugin(**overrides) -> PluginInstance:
+    fields = dict(
+        name="Untitled", au_type="aufx", au_subtype="SthB", au_manufacturer="OekS", is_waves=False,
+        raw_plist={}, raw_plist_bytes=b"exact-original-plist-bytes", channel_index=0, track_id=100, insert_slot=0,
+    )
+    fields.update(overrides)
+    return PluginInstance(**fields)
+
+
+def test_report_shows_a_transplanted_instance():
+    plugin = _transplantable_plugin()
+    project = _demo_project(plugins=[plugin], track_names_by_id={100: "Vox"})
+    match = PluginMatch(logic_plugin_name="Soothe2", preset_name="", category="", character="")
+
+    with patch("logic2ableton.report.installed_au_components", return_value={("aufx", "SthB", "OekS")}), \
+         patch("logic2ableton.report.installed_au_component_versions", return_value={}), \
+         patch("logic2ableton.report.au_platform_supported", return_value=True):
+        report = generate_report(project, [match])
+
+    assert "-> Transplanted: exact Logic state carried over" in report
+    assert 'Plugin settings/parameters for instances marked "Suggested"' in report
+
+
+def test_report_shows_the_not_installed_fallback_reason():
+    plugin = _transplantable_plugin()
+    project = _demo_project(plugins=[plugin], track_names_by_id={100: "Vox"})
+    match = PluginMatch(
+        logic_plugin_name="Soothe2", preset_name="", category="", character="", suggested_vst3s=["Fresh Air"],
+    )
+
+    with patch("logic2ableton.report.installed_au_components", return_value=set()), \
+         patch("logic2ableton.report.installed_au_component_versions", return_value={}), \
+         patch("logic2ableton.report.au_platform_supported", return_value=True):
+        report = generate_report(project, [match])
+
+    assert "-> Suggested: Fresh Air (not transplanted: not installed as an Audio Unit on this machine)" in report
+    assert "Plugin settings/parameters (not compatible across DAWs)" in report
+
+
+def test_report_shows_the_no_captured_state_fallback_reason():
+    plugin = _transplantable_plugin(raw_plist_bytes=b"")
+    project = _demo_project(plugins=[plugin], track_names_by_id={100: "Vox"})
+    match = PluginMatch(logic_plugin_name="Soothe2", preset_name="", category="", character="")
+
+    report = generate_report(project, [match])
+
+    assert "not transplanted: no plugin state was captured from the Logic project for this instance" in report
+
+
+def test_report_shows_the_platform_unsupported_fallback_reason():
+    plugin = _transplantable_plugin()
+    project = _demo_project(plugins=[plugin], track_names_by_id={100: "Vox"})
+    match = PluginMatch(logic_plugin_name="Soothe2", preset_name="", category="", character="")
+
+    with patch("logic2ableton.report.installed_au_components", return_value={("aufx", "SthB", "OekS")}), \
+         patch("logic2ableton.report.installed_au_component_versions", return_value={}), \
+         patch("logic2ableton.report.au_platform_supported", return_value=False):
+        report = generate_report(project, [match])
+
+    assert "not transplanted: this platform has no Audio Unit support" in report
+
+
+def test_report_never_shows_a_version_mismatch_even_when_versions_plainly_differ():
+    """See decide_transplant's docstring: Logic's recorded 'version' is a preset-format
+    key, not a software version, so it's never comparable to the installed version --
+    the report must never print a VERSION MISMATCH note, even here where the two
+    numbers look obviously different."""
+    plugin = _transplantable_plugin(raw_plist={"version": 3})
+    project = _demo_project(plugins=[plugin], track_names_by_id={100: "Vox"})
+    match = PluginMatch(logic_plugin_name="Soothe2", preset_name="", category="", character="")
+
+    with patch("logic2ableton.report.installed_au_components", return_value={("aufx", "SthB", "OekS")}), \
+         patch(
+             "logic2ableton.report.installed_au_component_versions",
+             return_value={("aufx", "SthB", "OekS"): 262146},
+         ), \
+         patch("logic2ableton.report.au_platform_supported", return_value=True):
+        report = generate_report(project, [match])
+
+    assert "-> Transplanted: exact Logic state carried over" in report
+    assert "VERSION MISMATCH" not in report
 
 
 def test_report_contains_compatibility_warnings():

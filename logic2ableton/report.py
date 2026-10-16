@@ -2,6 +2,13 @@
 
 import fnmatch
 
+from logic2ableton.au_registry import (
+    au_platform_supported,
+    format_au_version,
+    installed_au_component_versions,
+    installed_au_components,
+)
+from logic2ableton.au_transplant import decide_transplant
 from logic2ableton.logic_parser import format_smpte
 from logic2ableton.models import HardwareOutput, LogicProject, TrackMixerState
 from logic2ableton.plugin_matcher import PluginMatch
@@ -218,16 +225,22 @@ def generate_report(
     # match_plugins() builds plugin_matches by iterating project.plugins in
     # order, one match per plugin -- zip relies on that index alignment.
     assert len(project.plugins) == len(plugin_matches), "plugin_matches must be match_plugins(project.plugins, ...)"
+    # Scanned once for the whole report, not once per plugin instance -- same
+    # reasoning as ableton_generator.generate_als: a project can carry dozens
+    # of third-party plugin instances, and each scan reparses every AU
+    # bundle's Info.plist. Skipped entirely when nothing has captured state
+    # to transplant, so a project (or test) with no raw_plist_bytes never
+    # touches the filesystem for this.
+    needs_au_scan = any(plugin.raw_plist_bytes for plugin in project.plugins)
+    platform_supported = au_platform_supported()
+    installed_components = installed_au_components() if needs_au_scan else set()
+    installed_versions = installed_au_component_versions() if needs_au_scan else {}
+    transplanted_count = 0
     for plugin, match in zip(project.plugins, plugin_matches):
         preset = (
             f' "{match.preset_name}"'
             if match.preset_name and match.preset_name != "#default"
             else ""
-        )
-        suggestions = (
-            ", ".join(match.suggested_vst3s[:3])
-            if match.suggested_vst3s
-            else "(no match found)"
         )
         if plugin.track_id is not None and plugin.insert_slot is not None:
             track_name = project.track_names_by_id.get(plugin.track_id, f"Track {plugin.track_id}")
@@ -235,7 +248,27 @@ def generate_report(
         else:
             where = "unresolved track/slot"
         lines.append(f"  {match.logic_plugin_name}{preset} ({where})")
-        lines.append(f"    -> Suggested: {suggestions}")
+
+        outcome = decide_transplant(
+            plugin, installed_components,
+            installed_versions=installed_versions, platform_supported=platform_supported,
+        )
+        if outcome.status == "transplanted":
+            transplanted_count += 1
+            detail = "Transplanted: exact Logic state carried over"
+            if outcome.version_mismatch:
+                detail += (
+                    f" -- VERSION MISMATCH: Logic used version {outcome.logic_version}, "
+                    f"{format_au_version(outcome.installed_version)} is installed here; double-check the result"
+                )
+            lines.append(f"    -> {detail}")
+        else:
+            suggestions = (
+                ", ".join(match.suggested_vst3s[:3])
+                if match.suggested_vst3s
+                else "(no match found)"
+            )
+            lines.append(f"    -> Suggested: {suggestions} (not transplanted: {outcome.reason})")
     lines.append("")
 
     midi_tracks = [t for t in project.midi_tracks if t.note_count > 0]
@@ -324,7 +357,13 @@ def generate_report(
 
     lines.append("NOT TRANSFERRED:")
     lines.append("  - Software instruments and MIDI effects (notes become native MIDI tracks, but reload the instruments in Ableton)")
-    lines.append("  - Plugin settings/parameters (not compatible across DAWs)")
+    if transplanted_count:
+        lines.append(
+            "  - Plugin settings/parameters for instances marked \"Suggested\" above, not \"Transplanted\" "
+            "(see PLUGINS FOUND; a transplanted instance's exact Logic state was carried over)"
+        )
+    else:
+        lines.append("  - Plugin settings/parameters (not compatible across DAWs)")
     lines.append(
         "  - Automation beyond track volume and pan (see TRACK AUTOMATION above for what was transferred)"
     )

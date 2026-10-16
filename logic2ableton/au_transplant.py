@@ -14,9 +14,100 @@ and .scratch/au-plugin-state-transplant/spec.md for how this was found.
 
 import struct
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 
 from logic2ableton.models import PluginInstance
 from logic2ableton.plugin_database import lookup_au_plugin
+
+# Human-readable fallback reasons, kept as module constants so the decision
+# logic here and the report's wording (report.py) can't drift apart.
+NOT_INSTALLED_REASON = "not installed as an Audio Unit on this machine"
+NO_CAPTURED_STATE_REASON = "no plugin state was captured from the Logic project for this instance"
+PLATFORM_UNSUPPORTED_REASON = "this platform has no Audio Unit support"
+
+
+@dataclass(frozen=True)
+class TransplantOutcome:
+    """Why a plugin instance did or didn't get its exact Logic state transplanted.
+
+    ``status`` is one of "transplanted", "not_installed", "no_captured_state",
+    or "platform_unsupported" -- tracked as distinct reasons (not a single
+    generic "skipped") so the report can always say exactly why, per the
+    spec's core promise: never leave the user guessing what to double-check.
+
+    ``version_mismatch`` is currently always False -- see decide_transplant's
+    docstring: no field was found in a Logic plugin instance's plist that
+    reliably holds its software version, so there is nothing trustworthy to
+    compare the installed version against yet. ``logic_version``/
+    ``installed_version`` are still populated on a "transplanted" outcome in
+    case a genuine version source turns up later.
+    """
+    status: str
+    reason: str | None = None
+    version_mismatch: bool = False
+    logic_version: int | None = None
+    installed_version: int | None = None
+
+
+def decide_transplant(
+    plugin: PluginInstance,
+    installed_components: set[tuple[str, str, str]],
+    *,
+    installed_versions: dict[tuple[str, str, str], int] | None = None,
+    platform_supported: bool = True,
+) -> TransplantOutcome:
+    """Single source of truth for whether ``plugin`` gets transplanted, and why
+    not when it doesn't -- used both by the writer (ableton_generator.py, to
+    decide what to actually insert) and the report (report.py, to describe
+    the same decision) so the two can never disagree about a given instance.
+
+    Checked in this order: a plugin with no captured state can never be
+    transplanted regardless of what's installed; a platform with no AU
+    support at all fails every instance for that one reason rather than the
+    generic "not installed"; only then is the installed-component registry
+    consulted.
+
+    Version comparison (US16) is currently never flagged, by design, not
+    oversight: Logic's own recorded `version` (inside ``plugin.raw_plist``)
+    turned out, against real Logic projects, to almost always be 0 --
+    sampling a real multi-plugin session found 686 of 704 instances at
+    exactly 0, with the rare non-zero case still a tiny integer (1), nothing
+    like a release version such as "4.02". That is consistent with Apple's
+    own AU ClassInfo convention, where this key is a *preset dictionary
+    format* version (kAUPresetVersionKey), not the plugin's software version
+    -- it is not the same kind of number, in any case, as the installed
+    component's own declared version (``installed_versions``, a real packed
+    major/minor/bugfix int). The two are from unrelated number spaces
+    regardless of whether Logic's value happens to be 0 or not: an early
+    version of this logic only suppressed the comparison when it was 0,
+    which fixed the 97% case but still spuriously "mismatched" the rare
+    non-zero case every time, since a preset-format version like 1 will
+    essentially never equal a packed bundle version like 262146 by chance.
+    That reproduced exactly the noise this flag exists to avoid, just for a
+    smaller slice. No field was found anywhere in a Logic plugin instance's
+    plist that reliably holds its software version, so the comparison is
+    disabled outright rather than narrowed further -- ``version_mismatch``
+    is always False today. ``logic_version``/``installed_version`` are still
+    populated on a transplanted outcome in case a genuine version source
+    turns up later; nothing currently reads them for a true/false judgement.
+    """
+    if not plugin.raw_plist_bytes:
+        return TransplantOutcome(status="no_captured_state", reason=NO_CAPTURED_STATE_REASON)
+    if not platform_supported:
+        return TransplantOutcome(status="platform_unsupported", reason=PLATFORM_UNSUPPORTED_REASON)
+
+    identity = (plugin.au_type, plugin.au_subtype, plugin.au_manufacturer)
+    if identity not in installed_components:
+        return TransplantOutcome(status="not_installed", reason=NOT_INSTALLED_REASON)
+
+    logic_version = plugin.raw_plist.get("version") if isinstance(plugin.raw_plist, dict) else None
+    installed_version = (installed_versions or {}).get(identity)
+    return TransplantOutcome(
+        status="transplanted",
+        version_mismatch=False,
+        logic_version=logic_version,
+        installed_version=installed_version,
+    )
 
 
 def _display_name(plugin: PluginInstance) -> str:
