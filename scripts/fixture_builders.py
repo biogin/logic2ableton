@@ -241,6 +241,32 @@ def logic_note_record(
     return record
 
 
+_LOGIC_AUTOMATION_PARAMETERS = {"volume": 7, "pan": 10}
+
+
+def logic_automation_record(
+    rel_tick: int,
+    parameter: str,
+    raw_value: float,
+    *,
+    interpolated: bool = False,
+    end_of_ramp: bool = False,
+) -> bytes:
+    """A 16-byte automation breakpoint (status 0x50): see _automation_points's notes
+    for the byte layout this mirrors (+8 the fader-scale value, +12 the parameter
+    id, +15 the authored/interpolated/end-of-ramp kind flag)."""
+    kind = 0x01
+    if interpolated:
+        kind |= 0x40
+    if end_of_ramp:
+        kind |= 0x20
+    return (
+        struct.pack("<II", 0x50, _LOGIC_SEQUENCE_ORIGIN + rel_tick)
+        + struct.pack("<I", int(round(raw_value * (1 << 24))))
+        + bytes([_LOGIC_AUTOMATION_PARAMETERS[parameter], 0, 0, kind])
+    )
+
+
 def _logic_tempo_record(tick: int, bpm: float, seconds: float) -> bytes:
     """A tempo event (status 0x60): the tempo x 10000 and the time it falls on,
     in 1/2000 s counted from one hour."""

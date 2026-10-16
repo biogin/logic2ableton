@@ -17,8 +17,18 @@ from logic2ableton.ableton_generator import (
 )
 from logic2ableton.ableton_metadata import main_track, parameter_events
 from logic2ableton.logic_parser import parse_logic_project
-from logic2ableton.models import AudioFileRef, LogicMidiNote, LogicMidiTrack, LogicProject, TrackMixerState
+from logic2ableton.models import (
+    AudioFileRef,
+    AutomationBreakpoint,
+    LogicMidiNote,
+    LogicMidiTrack,
+    LogicProject,
+    PluginInstance,
+    TrackAutomation,
+    TrackMixerState,
+)
 from logic2ableton.timeline import TempoEvent, Timeline, TimelineMarker
+from unittest.mock import patch
 
 from conftest import TEST_PROJECT, TEST_PROJECT_NAME, write_test_wav
 from scripts.fixture_builders import build_synthetic_logicx
@@ -795,6 +805,152 @@ def test_generate_als_tempo_automation_writes_step_pairs(tmp_path):
 
     ids = [e.get("Id") for e in events]
     assert len(ids) == len(set(ids))
+
+
+def test_generate_als_track_automation_writes_envelope_events(tmp_path):
+    """A cloned track's Envelopes list starts empty -- Live only writes an
+    AutomationEnvelope once something is actually automated -- so this also
+    covers building one from scratch, not just filling an existing one."""
+    project = _timeline_project("TrackAutomation", ["Vox"], [])
+    project.automation = {
+        "Vox": TrackAutomation(
+            volume=[
+                AutomationBreakpoint(beats=0.0, value=-12.0),
+                AutomationBreakpoint(beats=4.0, value=0.0),
+            ],
+            pan=[AutomationBreakpoint(beats=0.0, value=-1.0)],
+        ),
+    }
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(
+        t for t in root.iter("AudioTrack") if t.find(".//Name/EffectiveName").get("Value") == "Vox"
+    )
+    mixer = track.find("DeviceChain/Mixer")
+
+    vol_param = mixer.find("Volume")
+    assert float(vol_param.find("Manual").get("Value")) == pytest.approx(10 ** (-12 / 20), abs=1e-6)
+    vol_events = parameter_events(track, vol_param)
+    assert [(e.get("Time"), float(e.get("Value"))) for e in vol_events] == [
+        ("-63072000", pytest.approx(10 ** (-12 / 20), abs=1e-6)),
+        ("0", pytest.approx(10 ** (-12 / 20), abs=1e-6)),
+        ("4", pytest.approx(1.0, abs=1e-6)),
+    ]
+
+    pan_param = mixer.find("Pan")
+    assert pan_param.find("Manual").get("Value") == "-1"
+    pan_events = parameter_events(track, pan_param)
+    assert [(e.get("Time"), e.get("Value")) for e in pan_events] == [("-63072000", "-1"), ("0", "-1")]
+
+    _assert_unique_critical_ids(root)
+
+
+def test_generate_als_track_automation_mute_point_is_silent(tmp_path):
+    """-inf dB (a fader pulled to the floor) must not crash number formatting."""
+    project = _timeline_project("TrackAutomationMute", ["Vox"], [])
+    project.automation = {
+        "Vox": TrackAutomation(volume=[AutomationBreakpoint(beats=0.0, value=float("-inf"))]),
+    }
+
+    als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(
+        t for t in root.iter("AudioTrack") if t.find(".//Name/EffectiveName").get("Value") == "Vox"
+    )
+    vol_param = track.find("DeviceChain/Mixer/Volume")
+    assert vol_param.find("Manual").get("Value") == "0"
+
+
+def _plugin_instance(**overrides) -> PluginInstance:
+    fields = dict(
+        name="Untitled",
+        au_type="aufx",
+        au_subtype="SthB",
+        au_manufacturer="OekS",
+        is_waves=False,
+        raw_plist={},
+        raw_plist_bytes=b"exact-original-plist-bytes",
+        channel_index=0,
+        track_id=1,
+        insert_slot=0,
+    )
+    fields.update(overrides)
+    return PluginInstance(**fields)
+
+
+def test_generate_als_transplants_an_installed_plugin_in_insert_order(tmp_path):
+    project = _timeline_project("PluginTransplant", ["Vox"], [])
+    project.track_names_by_id = {1: "Vox"}
+    project.plugins = [
+        _plugin_instance(au_subtype="AAAA", insert_slot=1, raw_plist_bytes=b"second-insert-bytes"),
+        _plugin_instance(au_subtype="BBBB", insert_slot=0, raw_plist_bytes=b"first-insert-bytes"),
+    ]
+
+    installed = {("aufx", "AAAA", "OekS"), ("aufx", "BBBB", "OekS")}
+    with patch("logic2ableton.ableton_generator.installed_au_components", return_value=installed):
+        als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(t for t in root.iter("AudioTrack") if t.find(".//Name/EffectiveName").get("Value") == "Vox")
+    devices = track.find("DeviceChain/DeviceChain/Devices")
+    buffers = [d.find(".//Buffer").text for d in devices.findall("PluginDevice")]
+    assert [bytes.fromhex(b) for b in buffers] == [b"first-insert-bytes", b"second-insert-bytes"]
+    _assert_unique_critical_ids(root)
+
+
+def test_generate_als_skips_a_plugin_not_installed_on_this_machine(tmp_path):
+    project = _timeline_project("PluginFallback", ["Vox"], [])
+    project.track_names_by_id = {1: "Vox"}
+    project.plugins = [_plugin_instance()]
+
+    with patch("logic2ableton.ableton_generator.installed_au_components", return_value=set()):
+        als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(t for t in root.iter("AudioTrack") if t.find(".//Name/EffectiveName").get("Value") == "Vox")
+    devices = track.find("DeviceChain/DeviceChain/Devices")
+    assert list(devices) == []
+
+
+def test_generate_als_skips_a_plugin_with_no_captured_state(tmp_path):
+    """raw_plist_bytes empty means the plist couldn't be captured; never fabricate a device for it."""
+    project = _timeline_project("PluginNoState", ["Vox"], [])
+    project.track_names_by_id = {1: "Vox"}
+    project.plugins = [_plugin_instance(raw_plist_bytes=b"")]
+
+    installed = {("aufx", "SthB", "OekS")}
+    with patch("logic2ableton.ableton_generator.installed_au_components", return_value=installed):
+        als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(t for t in root.iter("AudioTrack") if t.find(".//Name/EffectiveName").get("Value") == "Vox")
+    devices = track.find("DeviceChain/DeviceChain/Devices")
+    assert list(devices) == []
+
+
+def test_generate_als_scans_installed_au_components_once_not_per_plugin(tmp_path):
+    """A project with several third-party plugins must not rescan the AU component
+    directories (and reparse every bundle's Info.plist) once per instance."""
+    project = _timeline_project("PluginScanOnce", ["Vox", "Drums"], [])
+    project.track_names_by_id = {1: "Vox", 2: "Drums"}
+    project.plugins = [
+        _plugin_instance(au_subtype="AAAA", track_id=1, channel_index=0),
+        _plugin_instance(au_subtype="BBBB", track_id=1, channel_index=0, insert_slot=1),
+        _plugin_instance(au_subtype="CCCC", track_id=2, channel_index=1),
+    ]
+
+    with patch("logic2ableton.ableton_generator.installed_au_components", return_value=set()) as mocked:
+        generate_als(project, tmp_path / "out", copy_audio=False)
+
+    assert mocked.call_count == 1
 
 
 def test_generate_als_locators_schema_and_order(tmp_path):

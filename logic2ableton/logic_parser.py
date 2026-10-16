@@ -16,18 +16,23 @@ from logic2ableton.paths import contained_source_path
 from logic2ableton.logic_project_data import (
     PPQ,
     SEQUENCE_ORIGIN_TICKS,
+    _PAN_CENTRE,
+    _UNITY_FADER,
     LogicArrangement,
     LogicChannelStrip,
+    LogicMixer,
     decode_project_data,
 )
 from logic2ableton.models import (
     AudioFileRef,
+    AutomationBreakpoint,
     HardwareOutput,
     LogicMidiNote,
     LogicMidiRegion,
     LogicMidiTrack,
     LogicProject,
     PluginInstance,
+    TrackAutomation,
     TrackGroup,
     TrackMixerState,
     parse_audio_filename,
@@ -160,11 +165,37 @@ def _read_project_data(logicx_path: Path, alternative: int = 0) -> bytes:
         return read_session_bytes(f, "Logic ProjectData")
 
 
-def extract_plugins(logicx_path: Path, alternative: int = 0, *, _data: bytes | None = None) -> list[PluginInstance]:
-    """Extract plugin instances from embedded plists in ProjectData."""
+def _strip_for_plist_offset(sorted_strips: list[LogicChannelStrip], start: int) -> LogicChannelStrip | None:
+    """The channel strip whose insert chain a plist at file offset ``start`` belongs to.
+
+    Plugins are not referenced from their strip's AuCO object by id or field --
+    file position is what ties them together (see logic_project_data's AuCO
+    notes): a plist belongs to the nearest strip whose own AuCO object sits
+    before it. ``sorted_strips`` must be sorted by offset ascending.
+    """
+    offsets = [s.offset for s in sorted_strips]
+    index = bisect.bisect_right(offsets, start) - 1
+    return sorted_strips[index] if index >= 0 else None
+
+
+def extract_plugins(
+    logicx_path: Path, alternative: int = 0, *, _data: bytes | None = None, mixer: "LogicMixer | None" = None,
+) -> list[PluginInstance]:
+    """Extract plugin instances from embedded plists in ProjectData.
+
+    When ``mixer`` is given (the same one decode_project_data's arrangement
+    carries), each instance is attributed to the channel strip and insert
+    position it came from -- otherwise channel_index/track_id/insert_slot
+    are left None, as for any caller that only wants plugin identities.
+    """
     data = _data if _data is not None else _read_project_data(logicx_path, alternative)
     if not data:
         return []
+
+    sorted_strips = sorted(
+        (s for s in (mixer.strips.values() if mixer else ()) if s.offset is not None), key=lambda s: s.offset,
+    )
+    slot_counters: dict[int, int] = {}
 
     plugins = []
     for match in re.finditer(rb"<\?xml version", data):
@@ -173,8 +204,9 @@ def extract_plugins(logicx_path: Path, alternative: int = 0, *, _data: bytes | N
         if end_marker == -1:
             continue
         end = end_marker + len(b"</plist>")
+        raw_bytes = data[start:end]
         try:
-            parsed = plistlib.loads(data[start:end])
+            parsed = plistlib.loads(raw_bytes)
         except Exception:
             continue
         if not isinstance(parsed, dict) or "name" not in parsed:
@@ -184,6 +216,14 @@ def extract_plugins(logicx_path: Path, alternative: int = 0, *, _data: bytes | N
         subtype_int = parsed.get("subtype", 0)
         type_int = parsed.get("type", 0)
 
+        channel_index = track_id = insert_slot = None
+        strip = _strip_for_plist_offset(sorted_strips, start)
+        if strip is not None:
+            channel_index = strip.index
+            track_id = strip.track_id
+            insert_slot = slot_counters.get(strip.index, 0)
+            slot_counters[strip.index] = insert_slot + 1
+
         plugins.append(PluginInstance(
             name=parsed["name"],
             au_type=_int_to_4cc(type_int) if isinstance(type_int, int) else str(type_int),
@@ -191,6 +231,10 @@ def extract_plugins(logicx_path: Path, alternative: int = 0, *, _data: bytes | N
             au_manufacturer=_int_to_4cc(mfr_int) if isinstance(mfr_int, int) else str(mfr_int),
             is_waves="Waves_XPst" in parsed,
             raw_plist=parsed,
+            raw_plist_bytes=raw_bytes,
+            channel_index=channel_index,
+            track_id=track_id,
+            insert_slot=insert_slot,
         ))
     return plugins
 
@@ -1569,6 +1613,56 @@ def _arrangement_midi_tracks(
     return tracks
 
 
+def _arrangement_automation(
+    arrangement: LogicArrangement,
+    *,
+    track_names_by_id: dict[int, str],
+    warnings: list[str],
+) -> dict[str, TrackAutomation]:
+    """One TrackAutomation per Logic track with authored volume/pan automation nodes.
+
+    Only straight segments between authored nodes are reconstructed; Logic's
+    own (possibly curved) interpolation shape is not replicated -- see
+    logic_project_data's automation notes.
+    """
+    by_track: dict[int, TrackAutomation] = {}
+    unrecognized = 0
+    for placement in arrangement.placements:
+        if placement.kind != "midi":
+            continue
+        sequence = arrangement.sequences.get(placement.sequence_id)
+        if sequence is None or not sequence.is_container or not sequence.automation:
+            continue
+        base_beats = arrangement.region_beats(placement.tick)
+        automation = by_track.setdefault(placement.track_id, TrackAutomation())
+        for point in sequence.automation:
+            relative = (point.tick - SEQUENCE_ORIGIN_TICKS - sequence.content_start) / PPQ
+            beats = max(0.0, base_beats + relative)
+            if point.parameter == "volume":
+                value = -math.inf if point.raw_value <= 0 else 40.0 * math.log10(point.raw_value / _UNITY_FADER)
+                automation.volume.append(AutomationBreakpoint(beats=beats, value=value))
+            elif point.parameter == "pan":
+                offset = point.raw_value - _PAN_CENTRE
+                value = max(-1.0, min(1.0, offset / (_PAN_CENTRE if offset < 0 else _PAN_CENTRE - 1)))
+                automation.pan.append(AutomationBreakpoint(beats=beats, value=value))
+            else:
+                unrecognized += 1
+    if unrecognized:
+        warnings.append(
+            f"{unrecognized} automation point(s) used a parameter this converter doesn't yet "
+            "recognize (only volume and pan are supported) and were skipped."
+        )
+    result: dict[str, TrackAutomation] = {}
+    for track_id, automation in by_track.items():
+        if automation.is_empty:
+            continue
+        automation.volume.sort(key=lambda bp: bp.beats)
+        automation.pan.sort(key=lambda bp: bp.beats)
+        track_name = track_names_by_id.get(track_id) or arrangement.track_name(track_id)
+        result[track_name] = automation
+    return result
+
+
 def _within_window(
     passes: list[tuple[float, int, int | None]], start: float, end: float, clock: "_BeatClock",
 ) -> list[tuple[float, int, int | None]]:
@@ -1864,13 +1958,15 @@ def parse_logic_project(
     else:
         effective_smpte_start = smpte_start_seconds
 
-    # Read ProjectData once, share across extractors.
+    # Read ProjectData once, share across extractors. The arrangement (and its
+    # mixer) is decoded before plugins are extracted so each plugin instance
+    # can be attributed to the channel strip/insert slot it came from.
     project_data = _read_project_data(logicx_path, alternative)
-    plugins = extract_plugins(logicx_path, alternative, _data=project_data)
     midi_warnings: list[str] = []
     clamped_files: list[str] = []
     bar_beats = beats_per_bar(meta["time_sig_numerator"], meta["time_sig_denominator"])
     arrangement = decode_project_data(project_data, beats_per_bar=bar_beats)
+    plugins = extract_plugins(logicx_path, alternative, _data=project_data, mixer=arrangement.mixer)
     arrangement_decoded = bool(arrangement.regions)
     supplied_tempo = list(timeline.tempo_events) if timeline is not None else []
     project_tempo = meta["tempo"]
@@ -1880,6 +1976,8 @@ def parse_logic_project(
     track_groups: dict[str, TrackGroup] = {}
     track_group: dict[str, str] = {}
     track_outputs: dict[str, HardwareOutput] = {}
+    automation: dict[str, TrackAutomation] = {}
+    track_names_by_id: dict[int, str] = {}
     if arrangement_decoded:
         # The project's own arrangement says where every region sits, how it
         # loops and which track owns it, so audio timestamps and the SMPTE
@@ -1893,6 +1991,9 @@ def parse_logic_project(
         track_names_by_id = _unique_track_names(arrangement, midi_warnings)
         midi_tracks = _arrangement_midi_tracks(
             arrangement, bar_beats=bar_beats, track_names_by_id=track_names_by_id, warnings=midi_warnings,
+        )
+        automation = _arrangement_automation(
+            arrangement, track_names_by_id=track_names_by_id, warnings=midi_warnings,
         )
         audio_files, track_names = _arrangement_audio_refs(
             arrangement,
@@ -1979,6 +2080,8 @@ def parse_logic_project(
         metadata_audio_files=meta["audio_files"],
         software_instrument_files=meta["software_instrument_files"],
         midi_tracks=midi_tracks,
+        automation=automation,
+        track_names_by_id=track_names_by_id,
         compatibility_warnings=compatibility_warnings,
         smpte_start_seconds=effective_smpte_start,
         smpte_start_inferred=smpte_start_inferred,

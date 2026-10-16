@@ -76,6 +76,20 @@ class PluginInstance:
     au_manufacturer: str    # 4CC manufacturer (ksWV, appl, etc.)
     is_waves: bool          # Has Waves_XPst data
     raw_plist: dict         # Full parsed plist for future use
+    # The exact original plist bytes (identity fields, vendor state payload,
+    # and everything else Logic wrote), byte-for-byte -- NOT a re-serialization
+    # of raw_plist. Required for AU state transplant: a host's ClassInfo is the
+    # whole dictionary, and a partial/reconstructed one silently loads the
+    # plugin's factory default instead of erroring. See
+    # .scratch/logic-to-ableton-fidelity/issues/01-au-classinfo-blob-transplant-spike.md.
+    raw_plist_bytes: bytes = b""
+    # Attribution to the specific channel strip / insert slot this instance
+    # came from -- None when no mixer was available to resolve it against
+    # (extract_plugins's mixer argument is optional). track_id is the same
+    # Envi-object id space used elsewhere (track_names_by_id, placements).
+    channel_index: int | None = None    # Logic's own channel number
+    track_id: int | None = None         # the track object this strip plays through
+    insert_slot: int | None = None      # 0-based position in that strip's insert chain
 
 
 @dataclass
@@ -113,6 +127,26 @@ class LogicMidiRegion:
 
 
 @dataclass
+class AutomationBreakpoint:
+    """One authored automation node, already converted to its display unit."""
+    beats: float             # absolute arrangement position
+    value: float              # dB for volume, -1.0..1.0 for pan
+
+
+@dataclass
+class TrackAutomation:
+    """A track's authored automation nodes, keyed by parameter. Ramp shape between
+    nodes is reconstructed as a straight line; Logic's own (possibly curved)
+    interpolation is not replicated -- see LogicAutomationPoint's notes."""
+    volume: list[AutomationBreakpoint] = field(default_factory=list)
+    pan: list[AutomationBreakpoint] = field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.volume and not self.pan
+
+
+@dataclass
 class LogicMidiTrack:
     name: str
     notes: list[LogicMidiNote] = field(default_factory=list)  # absolute, loops unrolled
@@ -147,6 +181,8 @@ class LogicProject:
     metadata_audio_files: list[str] = field(default_factory=list)
     software_instrument_files: int = 0
     midi_tracks: list[LogicMidiTrack] = field(default_factory=list)
+    automation: dict[str, TrackAutomation] = field(default_factory=dict)  # by track name
+    track_names_by_id: dict[int, str] = field(default_factory=dict)  # Envi-id space; see PluginInstance.track_id
     compatibility_warnings: list[str] = field(default_factory=list)
     smpte_start_seconds: float = 3600.0
     smpte_start_inferred: bool = False

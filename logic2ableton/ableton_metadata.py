@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from logic2ableton.models import TrackAutomation
     from logic2ableton.timeline import TempoMap
 
 # The sentinel event Live writes on every automated envelope to carry its
@@ -160,6 +161,100 @@ def set_tempo_automation(live_set: ET.Element, tempo_map: "TempoMap", allocator)
                 step.set("Time", _format_number(event.beat))
                 step.set("Value", _format_number(bpm))
         previous_bpm = event.bpm
+
+
+def _events_element(track: ET.Element, parameter: ET.Element) -> ET.Element | None:
+    """The parameter's existing Events element, or a freshly built one.
+
+    A track cloned from the template has an empty ``Envelopes`` list -- Live
+    only writes an ``AutomationEnvelope`` once something is actually
+    automated -- so the common case here is building one, not finding one.
+    """
+    target = parameter.find("AutomationTarget")
+    if target is None:
+        return None
+    target_id = target.get("Id")
+    envelopes = track.find("AutomationEnvelopes/Envelopes")
+    if envelopes is None:
+        return None
+    for envelope in envelopes.findall("AutomationEnvelope"):
+        pointee = envelope.find("EnvelopeTarget/PointeeId")
+        if pointee is not None and pointee.get("Value") == target_id:
+            return envelope.find("Automation/Events")
+
+    next_envelope_id = len(envelopes)
+    envelope = ET.SubElement(envelopes, "AutomationEnvelope")
+    envelope.set("Id", str(next_envelope_id))
+    target_elem = ET.SubElement(envelope, "EnvelopeTarget")
+    pointee_elem = ET.SubElement(target_elem, "PointeeId")
+    pointee_elem.set("Value", target_id)
+    automation = ET.SubElement(envelope, "Automation")
+    events = ET.SubElement(automation, "Events")
+    transform_state = ET.SubElement(automation, "AutomationTransformViewState")
+    ET.SubElement(transform_state, "IsTransformPending").set("Value", "false")
+    ET.SubElement(transform_state, "TimeAndValueTransforms")
+    return events
+
+
+def _volume_db_to_linear(db: float) -> float:
+    if db == float("-inf"):
+        return 0.0
+    linear = 10 ** (db / 20)
+    return max(0.0003162277571, min(1.99526238, linear))
+
+
+def _set_parameter_automation(
+    track: ET.Element,
+    parameter_name: str,
+    breakpoints: list,
+    allocator,
+    *,
+    to_value,
+) -> None:
+    """Write one parameter's breakpoints as FloatEvents on its existing envelope.
+
+    Reuses the template's own AutomationTarget/AutomationEnvelope plumbing
+    (same approach as set_tempo_automation) -- never allocates a new target,
+    only new FloatEvent ids. One event per authored breakpoint: these are
+    real multi-point curves, and Live already interpolates linearly between
+    events, so no forced stepping is needed here the way tempo needed it.
+    """
+    if not breakpoints:
+        return
+    mixer = track.find("DeviceChain/Mixer")
+    if mixer is None:
+        return
+    parameter = mixer.find(parameter_name)
+    if parameter is None:
+        return
+
+    first_value = _format_number(to_value(breakpoints[0].value))
+    manual = parameter.find("Manual")
+    if manual is not None:
+        manual.set("Value", first_value)
+
+    events_elem = _events_element(track, parameter)
+    if events_elem is None:
+        return
+    for event in list(events_elem):
+        events_elem.remove(event)
+
+    sentinel = ET.SubElement(events_elem, "FloatEvent")
+    sentinel.set("Id", str(allocator.next()))
+    sentinel.set("Time", _SENTINEL_TIME)
+    sentinel.set("Value", first_value)
+
+    for point in breakpoints:
+        event = ET.SubElement(events_elem, "FloatEvent")
+        event.set("Id", str(allocator.next()))
+        event.set("Time", _format_number(point.beats))
+        event.set("Value", _format_number(to_value(point.value)))
+
+
+def set_track_automation(track: ET.Element, automation: "TrackAutomation", allocator) -> None:
+    """Write a track's authored volume/pan automation nodes onto its envelopes."""
+    _set_parameter_automation(track, "Volume", automation.volume, allocator, to_value=_volume_db_to_linear)
+    _set_parameter_automation(track, "Pan", automation.pan, allocator, to_value=lambda v: max(-1.0, min(1.0, v)))
 
 
 def has_global_changes(live_set: ET.Element, name: str) -> bool:

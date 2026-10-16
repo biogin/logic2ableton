@@ -215,7 +215,10 @@ def generate_report(
     lines.append("")
 
     lines.append(f"PLUGINS FOUND ({len(plugin_matches)}):")
-    for match in plugin_matches:
+    # match_plugins() builds plugin_matches by iterating project.plugins in
+    # order, one match per plugin -- zip relies on that index alignment.
+    assert len(project.plugins) == len(plugin_matches), "plugin_matches must be match_plugins(project.plugins, ...)"
+    for plugin, match in zip(project.plugins, plugin_matches):
         preset = (
             f' "{match.preset_name}"'
             if match.preset_name and match.preset_name != "#default"
@@ -226,7 +229,12 @@ def generate_report(
             if match.suggested_vst3s
             else "(no match found)"
         )
-        lines.append(f"  {match.logic_plugin_name}{preset}")
+        if plugin.track_id is not None and plugin.insert_slot is not None:
+            track_name = project.track_names_by_id.get(plugin.track_id, f"Track {plugin.track_id}")
+            where = f"{track_name}, insert {plugin.insert_slot + 1}"
+        else:
+            where = "unresolved track/slot"
+        lines.append(f"  {match.logic_plugin_name}{preset} ({where})")
         lines.append(f"    -> Suggested: {suggestions}")
     lines.append("")
 
@@ -289,6 +297,23 @@ def generate_report(
             lines.append("  " + "; ".join(parts) + " in the .als (skipped when --report-only is used).")
         lines.append("")
 
+    if project.automation:
+        lines.append("TRACK AUTOMATION:")
+        for track_name, automation in project.automation.items():
+            parts = []
+            if automation.volume:
+                parts.append(f"{len(automation.volume)} volume point(s)")
+            if automation.pan:
+                parts.append(f"{len(automation.pan)} pan point(s)")
+            if parts:
+                lines.append(f"  {track_name}: {', '.join(parts)}")
+        lines.append(
+            "  Values at each authored node are exact; segments between them are written as straight "
+            "lines, which may not exactly match a curved move in Logic. Only volume and pan are "
+            "supported today -- see COMPATIBILITY WARNINGS below for any other automated parameter."
+        )
+        lines.append("")
+
     lines.append("COMPATIBILITY WARNINGS:")
     if project.compatibility_warnings:
         for warning in project.compatibility_warnings:
@@ -300,7 +325,9 @@ def generate_report(
     lines.append("NOT TRANSFERRED:")
     lines.append("  - Software instruments and MIDI effects (notes become native MIDI tracks, but reload the instruments in Ableton)")
     lines.append("  - Plugin settings/parameters (not compatible across DAWs)")
-    lines.append("  - Automation data (requires deeper binary parsing)")
+    lines.append(
+        "  - Automation beyond track volume and pan (see TRACK AUTOMATION above for what was transferred)"
+    )
     if project.mixer_from_project:
         lines.append("  - Sends, and aux channels fed only by sends such as reverb and delay returns (recreate manually in Ableton)")
     else:

@@ -6,7 +6,8 @@ import pytest
 from logic2ableton.report import generate_report
 from logic2ableton.logic_parser import parse_logic_project
 from logic2ableton.plugin_matcher import match_plugins
-from logic2ableton.models import LogicProject, TrackMixerState
+from logic2ableton.models import LogicProject, PluginInstance, TrackMixerState
+from logic2ableton.plugin_matcher import PluginMatch
 
 from conftest import TEST_PROJECT, TEST_PROJECT_NAME
 
@@ -46,6 +47,31 @@ def test_report_contains_mixer_state():
     assert "-6.0 dB" in report
     assert "pan 30%R" in report
     assert "MUTED" in report
+
+
+def test_report_shows_plugin_track_and_insert_slot():
+    plugin = PluginInstance(
+        name="Pro-Q 4", au_type="aufx", au_subtype="FQ4p", au_manufacturer="FabF", is_waves=False,
+        raw_plist={}, channel_index=0, track_id=100, insert_slot=2,
+    )
+    project = _demo_project(plugins=[plugin], track_names_by_id={100: "Deluxe Classic_bip_1_bip"})
+    match = PluginMatch(logic_plugin_name="Pro-Q 4", preset_name="", category="", character="")
+
+    report = generate_report(project, [match])
+
+    assert "(Deluxe Classic_bip_1_bip, insert 3)" in report
+
+
+def test_report_shows_unresolved_track_when_plugin_has_no_mixer_attribution():
+    plugin = PluginInstance(
+        name="Pro-Q 4", au_type="aufx", au_subtype="FQ4p", au_manufacturer="FabF", is_waves=False, raw_plist={},
+    )
+    project = _demo_project(plugins=[plugin])
+    match = PluginMatch(logic_plugin_name="Pro-Q 4", preset_name="", category="", character="")
+
+    report = generate_report(project, [match])
+
+    assert "(unresolved track/slot)" in report
 
 
 def test_report_contains_compatibility_warnings():

@@ -29,7 +29,22 @@ and later) and a u32 payload size. The objects read here:
       MIDI regions, class 0x88 (MIDI) or 0xBC (audio) at +39, audio region
       index at +40 and audio file id at +44 for audio regions.
       Per-track automation containers are stored as MIDI placements of an
-      MSeq named ``*Automation``.
+      MSeq named ``*Automation``. Its EvSq holds 16-byte status-0x50 records,
+      one per breakpoint: a u32 tick at +4 (as for any event), a u32 at +8
+      holding the automated value on the same 24-bit-fraction fader scale as
+      a channel strip's own fader (``value / 2**24``; see ``_UNITY_FADER``
+      and ``_PAN_CENTRE`` for the per-parameter dB/pan conversion), and at
+      +12 a flag byte whose low nibble-ish byte identifies the parameter
+      (``_AUTOMATION_PARAMETERS``: 7 volume, 10 pan) and whose
+      ``_AUTOMATION_INTERPOLATED`` bit (0x40) marks a point Logic baked by
+      resampling a ramp — never set on a node the user actually placed. A
+      ramp's two authored endpoints interpolate linearly on that same raw
+      fader-scale value, not in dB; the samples between them (densely
+      resampled, often every 15-123 ticks) are safe to discard and
+      reconstruct as a straight segment between the two real endpoints.
+      Verified against a controlled test project (ground truth: known dB/pan
+      values placed by hand and the file re-read), not yet against curved
+      (non-linear) ramps or any parameter beyond volume and pan.
     - 0x30 time signature (3 units): denominator as a power of two at +11,
       numerator at +12, class 0x88 at +23. The first one sits before bar 1
       (on the earliest bar line at or after tick 0); later ones are changes.
@@ -91,6 +106,16 @@ and later) and a u32 payload size. The objects read here:
       input is stereo and [mono inputs, buses] when it is mono. A number
       past the buses is not a bus: the aux of a multi-output instrument
       takes its input from the instrument.
+    - A strip's insert-chain plugins are not referenced from the AuCO object
+      at all -- there is no separate "insert slot" object or field found so
+      far. Each inserted plugin's state is an embedded XML plist (the same
+      one extract_plugins finds by scanning for ``<?xml version``), and
+      empirically its *file position* is what ties it to a strip: the
+      plugins immediately following a strip's own AuCO object, up to the
+      next AuCO object, are that strip's insert chain, in file order (which
+      matches the order the inserts occupy in Logic's own mixer). Confirmed
+      against a real strip with eleven inserts: eleven plists, in the right
+      order, all between that strip's AuCO object and the next one.
 * ``TxSq`` (text): an RTF blob holding a marker's name; its object id equals
   the marker id.
 * ``AuFl`` (audio file): u16-prefixed UTF-16LE file name at +44.
@@ -152,6 +177,9 @@ _AUDIO_REGION_STATUS = 0x24
 _NOTE_CLASS = 0x89
 _MARKER_CLASS = 0x88
 _PLACEMENT_CLASS = 0x89
+_AUTOMATION_STATUS = 0x50       # a track automation breakpoint, flat or part of a ramp
+_AUTOMATION_INTERPOLATED = 0x40 # set in the flag byte on a baked ramp sample, never on an authored node
+_AUTOMATION_PARAMETERS = {7: "volume", 10: "pan"}  # low byte of the flag field
 _MIDI_REGION_CLASS = 0x88
 _AUDIO_REGION_CLASS = 0xBC
 _FLAG_MUTE = 0x1
@@ -218,6 +246,14 @@ class LogicNote:
 
 
 @dataclass
+class LogicAutomationPoint:
+    """One authored breakpoint of a track automation parameter (ramp samples excluded)."""
+    tick: int           # region-relative, content origin at SEQUENCE_ORIGIN_TICKS, as for a note
+    parameter: str       # "volume" or "pan"; see _AUTOMATION_PARAMETERS
+    raw_value: float     # the stored fader-scale value (0-127ish); see _UNITY_FADER, _PAN_CENTRE
+
+
+@dataclass
 class LogicSequence:
     """An MSeq object: the content of one MIDI region."""
     id: int
@@ -225,6 +261,7 @@ class LogicSequence:
     content_start: int  # ticks into the sequence where the region window begins
     content_length: int  # ticks
     notes: list[LogicNote] = field(default_factory=list)
+    automation: list[LogicAutomationPoint] = field(default_factory=list)
 
     @property
     def is_container(self) -> bool:
@@ -304,6 +341,7 @@ class LogicChannelStrip:
     soloed: bool = False            # its solo button was on when the project was saved
     solo_silenced: bool = False     # silenced by a solo on other strips
     stereo_input: bool = False      # which input list the input number indexes
+    offset: int | None = None       # this strip's own AuCO object's file offset; see extract_plugins
 
     @property
     def is_aux(self) -> bool:
@@ -494,6 +532,26 @@ def _notes(data: bytes, seq: ObjectHeader) -> list[LogicNote]:
     return notes
 
 
+def _automation_points(data: bytes, seq: ObjectHeader) -> list[LogicAutomationPoint]:
+    """Authored breakpoints of an automation MSeq's EvSq: baked ramp samples excluded.
+
+    Byte +12 of the record identifies the parameter (_AUTOMATION_PARAMETERS);
+    byte +15 is a separate kind flag (_AUTOMATION_INTERPOLATED's bit marks a
+    baked ramp sample) -- two distinct bytes of the same trailing u32, not one.
+    """
+    points = []
+    for status, tick, pos, size in iter_records(data, seq):
+        if status != _AUTOMATION_STATUS or size < _UNIT:
+            continue
+        if data[pos + 15] & _AUTOMATION_INTERPOLATED:
+            continue
+        parameter_id = data[pos + 12]
+        parameter = _AUTOMATION_PARAMETERS.get(parameter_id, f"unknown_{parameter_id}")
+        raw_value = _u32(data, pos + 8) / float(1 << 24)
+        points.append(LogicAutomationPoint(tick=tick, parameter=parameter, raw_value=raw_value))
+    return points
+
+
 def _prefixed_text(data: bytes, offset: int, *, limit: int = 255, utf16: bool = False) -> str | None:
     if offset + 2 > len(data):
         return None
@@ -524,14 +582,20 @@ def _sequences(data: bytes, objects: list[ObjectHeader]) -> dict[int, LogicSeque
         content_start = _u32(data, base + 4)
         content_length = _u32(data, base + 60)
         notes: list[LogicNote] = []
+        automation: list[LogicAutomationPoint] = []
+        is_container = name.startswith("*")
         for follower in chain[index + 1:index + 3]:
             if follower.tag == "MSeq":
                 break
             if follower.tag == "EvSq":
-                notes = _notes(data, follower)
+                if is_container:
+                    automation = _automation_points(data, follower)
+                else:
+                    notes = _notes(data, follower)
                 break
         sequences[obj.id1] = LogicSequence(
-            id=obj.id1, name=name, content_start=content_start, content_length=content_length, notes=notes,
+            id=obj.id1, name=name, content_start=content_start, content_length=content_length,
+            notes=notes, automation=automation,
         )
     return sequences
 
@@ -594,6 +658,7 @@ def _mixer(data: bytes, objects: list[ObjectHeader]) -> LogicMixer:
             soloed=bool(data[base + 124] & _STRIP_SOLOED),
             solo_silenced=bool(state & _STRIP_SOLO_SILENCED),
             stereo_input=bool(data[base + 122] & 1),
+            offset=obj.offset,
         )
     # Channel numbers run through the types in order, each type taking as
     # many numbers as its highest strip number says, present or not. The

@@ -31,7 +31,9 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from logic2ableton.audio import read_audio_info
-from logic2ableton.ableton_metadata import encode_meter, set_global_parameter, set_tempo_automation
+from logic2ableton.ableton_metadata import encode_meter, set_global_parameter, set_tempo_automation, set_track_automation
+from logic2ableton.au_registry import installed_au_components
+from logic2ableton.au_transplant import make_au_plugin_device
 from logic2ableton.paths import create_output_directory, safe_name
 from logic2ableton.timeline import TempoMap, beats_per_bar
 
@@ -41,6 +43,7 @@ from logic2ableton.models import (
     LogicMidiNote,
     LogicMidiTrack,
     LogicProject,
+    PluginInstance,
     TrackGroup,
     TrackMixerState,
     samples_to_beats,
@@ -348,6 +351,45 @@ def _set_mixer_state(track: ET.Element, mixer_state: TrackMixerState | None) -> 
     solo_elem = mixer.find("SoloSink")
     if solo_elem is not None:
         solo_elem.set("Value", "true" if mixer_state.is_soloed else "false")
+
+
+def _insert_transplanted_plugins(
+    track: ET.Element,
+    plugins: list[PluginInstance],
+    allocator: _IdAllocator,
+    installed_components: set[tuple[str, str, str]],
+) -> int:
+    """Insert a PluginDevice carrying each transplantable plugin's exact Logic state.
+
+    Only a plugin with an AU component actually installed on this machine
+    (``installed_components``, scanned once per conversion -- not per
+    plugin instance, which would mean rescanning the AU directories and
+    reparsing every bundle's Info.plist dozens of times for a project with
+    many third-party plugins) and a captured original state
+    (raw_plist_bytes) is inserted; anything else is left to plugin_matcher's
+    existing suggestion-only path instead -- this never fails the
+    conversion for a plugin it can't transplant. ``plugins`` must already be
+    in insert-chain order. Returns how many were inserted, for the caller's
+    reporting.
+    """
+    devices = track.find("DeviceChain/DeviceChain/Devices")
+    if devices is None:
+        return 0
+    inserted = 0
+    for plugin in plugins:
+        if not plugin.raw_plist_bytes:
+            continue
+        if (plugin.au_type, plugin.au_subtype, plugin.au_manufacturer) not in installed_components:
+            continue
+        device = make_au_plugin_device(
+            plugin,
+            device_id=len(devices),
+            automation_target_id=allocator.next(),
+            pointee_id=allocator.next(),
+        )
+        devices.append(device)
+        inserted += 1
+    return inserted
 
 
 def _unwarped_clip_extent(duration_secs: float, offset_secs: float) -> dict:
@@ -1118,6 +1160,18 @@ def generate_als(
         export_refs.append(exported)
         clips_by_track.setdefault(ref.track_name, []).append(exported)
 
+    plugins_by_track_name: dict[str, list[PluginInstance]] = {}
+    for plugin in project.plugins:
+        if plugin.track_id is None:
+            continue
+        track_name = project.track_names_by_id.get(plugin.track_id)
+        if track_name is None:
+            continue
+        plugins_by_track_name.setdefault(track_name, []).append(plugin)
+    for track_plugins in plugins_by_track_name.values():
+        track_plugins.sort(key=lambda p: p.insert_slot if p.insert_slot is not None else 0)
+    installed_components = installed_au_components() if plugins_by_track_name else set()
+
     made: list[tuple[str, ET.Element]] = []
     for i, track_name in enumerate(project.track_names):
         color = i % 16
@@ -1141,6 +1195,10 @@ def generate_als(
 
         if project.mixer_state:
             _set_mixer_state(track, project.mixer_state.get(track_name))
+        if track_name in project.automation:
+            set_track_automation(track, project.automation[track_name], allocator)
+        if track_name in plugins_by_track_name:
+            _insert_transplanted_plugins(track, plugins_by_track_name[track_name], allocator, installed_components)
 
         made.append((track_name, track))
 
@@ -1170,6 +1228,12 @@ def generate_als(
                 )
                 if project.mixer_state:
                     _set_mixer_state(track, project.mixer_state.get(midi_track.name))
+                if midi_track.name in project.automation:
+                    set_track_automation(track, project.automation[midi_track.name], allocator)
+                if midi_track.name in plugins_by_track_name:
+                    _insert_transplanted_plugins(
+                        track, plugins_by_track_name[midi_track.name], allocator, installed_components,
+                    )
                 made.append((midi_track.name, track))
 
     if keep_outputs:

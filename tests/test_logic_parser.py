@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from logic2ableton.models import AudioFileRef
+from logic2ableton.logic_project_data import LogicChannelStrip, LogicMixer
 from logic2ableton.logic_parser import (
     _build_compatibility_warnings,
     _get_aiff_timestamp,
@@ -386,6 +387,48 @@ def test_extract_plugins_ignores_non_plugin_plists():
 
 def test_extract_plugins_empty_data_returns_empty():
     assert extract_plugins(Path("/x.logicx"), _data=b"") == []
+
+
+def _synthetic_strip(index: int, offset: int, track_id: int) -> LogicChannelStrip:
+    return LogicChannelStrip(
+        index=index, kind=0x40, number=index, label="", stereo=True, muted=False,
+        fader=90.0, pan=64, output=0, input=0, track_id=track_id, offset=offset,
+    )
+
+
+def test_extract_plugins_attributes_track_and_insert_slot():
+    """A plugin's owning strip and slot come from file position (nearest preceding
+    strip's own AuCO offset) -- see logic_project_data's AuCO notes for why."""
+    plist_a = plistlib.dumps({"name": "A", "type": _fourcc("aufx"), "subtype": _fourcc("AAA1"), "manufacturer": 0})
+    plist_b = plistlib.dumps({"name": "B", "type": _fourcc("aufx"), "subtype": _fourcc("BBB1"), "manufacturer": 0})
+    plist_c = plistlib.dumps({"name": "C", "type": _fourcc("aufx"), "subtype": _fourcc("CCC1"), "manufacturer": 0})
+    strip1_marker, strip2_marker = b"STRIP-ONE-AuCO", b"STRIP-TWO-AuCO"
+    # Strip one has two inserts (A, then B); strip two has one (C). An empty
+    # third strip after C must not fabricate a plugin for it.
+    blob = strip1_marker + plist_a + b"gap" + plist_b + strip2_marker + plist_c + b"STRIP-THREE-EMPTY"
+
+    strip1_offset = blob.index(strip1_marker)
+    strip2_offset = blob.index(strip2_marker)
+    strip3_offset = blob.index(b"STRIP-THREE-EMPTY")
+    mixer = LogicMixer(strips={
+        0: _synthetic_strip(0, strip1_offset, track_id=100),
+        1: _synthetic_strip(1, strip2_offset, track_id=200),
+        2: _synthetic_strip(2, strip3_offset, track_id=300),
+    })
+
+    plugins = extract_plugins(Path("/x.logicx"), _data=blob, mixer=mixer)
+
+    assert [(p.name, p.channel_index, p.track_id, p.insert_slot) for p in plugins] == [
+        ("A", 0, 100, 0),
+        ("B", 0, 100, 1),
+        ("C", 1, 200, 0),
+    ]
+
+
+def test_extract_plugins_without_a_mixer_leaves_attribution_unresolved():
+    plugin = plistlib.dumps({"name": "A", "type": _fourcc("aufx"), "subtype": _fourcc("AAA1"), "manufacturer": 0})
+    plugins = extract_plugins(Path("/x.logicx"), _data=plugin)
+    assert (plugins[0].channel_index, plugins[0].track_id, plugins[0].insert_slot) == (None, None, None)
 
 
 # Forward-lane MIDI/instrument detection

@@ -2,6 +2,7 @@
 
 import json
 import os
+import struct
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from logic2ableton.logic_parser import _get_audio_sample_rate, parse_logic_proje
 from logic2ableton.logic_project_data import (
     PROJECT_START_TICKS,
     SEQUENCE_ORIGIN_TICKS,
+    _automation_points,
     decode_project_data,
     iter_records,
     scan_objects,
@@ -21,6 +23,7 @@ from scripts.fixture_builders import (
     _logic_placement_record,
     build_logic_arrangement_project_data,
     build_synthetic_logicx,
+    logic_automation_record,
     logic_note_record,
     write_test_wav,
 )
@@ -329,6 +332,36 @@ def test_record_walk_ends_at_either_terminator_and_skips_stray_units():
     zero_status = b"\x00\x00\x00\x00\xff\xff\xff\x3f\x00\x00\x00\x00"
     blob, seq = _event_sequence(note + zero_status + b"\x00" * 4 + after, usual)
     assert [(status, tick) for status, tick, _, _ in iter_records(blob, seq)] == [(0x90, 38400)]
+
+
+def test_automation_points_keeps_authored_nodes_and_drops_baked_ramp_samples():
+    """Ground truth: a controlled Logic project with known dB/pan values, re-read.
+    See .scratch/logic-to-ableton-fidelity/issues/02-... for how these were derived."""
+    usual = b"\xf1\x00\x00\x00\xff\xff\xff\x3f\x00\x00\x00\x00"
+    records = (
+        logic_automation_record(0, "volume", 45.106851)       # -12.0 dB, authored start
+        + logic_automation_record(15, "volume", 45.150692, interpolated=True)  # baked ramp sample: dropped
+        + logic_automation_record(15360, "volume", 90.0, end_of_ramp=True)      # 0.0 dB, authored end
+        + logic_automation_record(0, "pan", 96.398438)         # +32, authored
+    )
+    blob, seq = _event_sequence(records, usual)
+    points = _automation_points(blob, seq)
+
+    assert [(p.parameter, p.tick, round(p.raw_value, 6)) for p in points] == [
+        ("volume", SEQUENCE_ORIGIN_TICKS, 45.106851),
+        ("volume", SEQUENCE_ORIGIN_TICKS + 15360, 90.0),
+        ("pan", SEQUENCE_ORIGIN_TICKS, 96.398438),
+    ]
+
+
+def test_automation_points_does_not_drop_an_unrecognized_parameter():
+    """Never silently drop data this converter doesn't understand yet -- the parser
+    layer reports it instead (_arrangement_automation's unrecognized-parameter warning)."""
+    usual = b"\xf1\x00\x00\x00\xff\xff\xff\x3f\x00\x00\x00\x00"
+    record = struct.pack("<II", 0x50, SEQUENCE_ORIGIN_TICKS) + struct.pack("<I", 1 << 24) + bytes([99, 0, 0, 0x01])
+    blob, seq = _event_sequence(record, usual)
+    points = _automation_points(blob, seq)
+    assert [p.parameter for p in points] == ["unknown_99"]
 
 
 def test_region_event_without_its_class_bytes_is_not_a_region():
