@@ -8,7 +8,7 @@ Demoable: run the converter on a real project with a third-party AU plugin, open
 
 **Blocked by:** 01
 
-**Status:** ready-for-human (one item below needs a human with Ableton open; everything else is done)
+**Status:** resolved
 
 - [x] The parser retains each plugin instance's complete original plist byte range (not a re-serialized reconstruction of the parsed dict) — issue 01's spike found that transplanting only the vendor-specific inner value silently resets the plugin to its factory default; the full original bytes are required.
 - [x] The writer synthesizes a correct `PluginDevice > PluginDesc > AuPluginInfo > Preset > AuPreset > Buffer` device for each transplantable instance, placed in its track's device chain at the right position (using ticket 01's slot attribution).
@@ -17,7 +17,7 @@ Demoable: run the converter on a real project with a third-party AU plugin, open
 - [x] A plugin not installed on the machine running the conversion falls through to the existing suggestion-only path; the conversion does not fail or crash.
 - [x] A plugin that is installed but not an Audio Unit (VST3-only, or running on a platform without AU) falls through the same way (the AU registry scan finds nothing on such a platform, which is indistinguishable from "not installed" — same fallback path, no special-casing needed).
 - [x] End-to-end test: converting a real project with a transplantable third-party AU plugin produces a `.als` whose `Buffer` content is byte-identical to the source plugin's original Logic plist.
-- [ ] Manual verification in real Ableton Live against at least one plugin instance, confirming the loaded settings visually match the Logic original (same kind of check as issue 01's spike). Not done in this pass — the underlying mechanism was already verified live in Ableton during issue 01's spike (oeksound soothe2), and this ticket's automated tests confirm the production code path produces byte-identical output through the same mechanism, but a fresh spot-check through the real pipeline (not the hand-built spike file) hasn't been done. Recommended before calling this fully closed.
+- [x] Manual verification in real Ableton Live against at least one plugin instance, confirming the loaded settings visually match the Logic original (same kind of check as issue 01's spike). Done: the real `logic2ableton` CLI output (not a hand-built spike file) was opened in real Ableton Live and checked against the original `simple beat.logicx` — all 11 transplanted devices on the `Deluxe Classic_bip_1_bip` channel strip, identical to Logic, no AU "could not be found" warnings.
 
 ## Answer
 
