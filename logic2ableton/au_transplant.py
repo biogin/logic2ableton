@@ -35,11 +35,12 @@ class TransplantOutcome:
     generic "skipped") so the report can always say exactly why, per the
     spec's core promise: never leave the user guessing what to double-check.
 
-    ``version_mismatch`` (and the two version fields) are only ever set on a
-    "transplanted" outcome: a version difference doesn't block the
-    transplant -- most vendors keep their state format compatible within a
-    major version lineage -- it's a flag for the user to double-check, not a
-    fallback reason.
+    ``version_mismatch`` is currently always False -- see decide_transplant's
+    docstring: no field was found in a Logic plugin instance's plist that
+    reliably holds its software version, so there is nothing trustworthy to
+    compare the installed version against yet. ``logic_version``/
+    ``installed_version`` are still populated on a "transplanted" outcome in
+    case a genuine version source turns up later.
     """
     status: str
     reason: str | None = None
@@ -66,21 +67,29 @@ def decide_transplant(
     generic "not installed"; only then is the installed-component registry
     consulted.
 
-    Version comparison (US16): Logic's own recorded `version` (inside
-    ``plugin.raw_plist``) turned out, against real Logic projects, to almost
-    always be 0 -- sampling a real multi-plugin session found 686 of 704
-    instances at exactly 0, with the rare non-zero case still a tiny integer
-    (1), nothing like a release version such as "4.02". That is consistent
-    with Apple's own AU ClassInfo convention, where this key is a *preset
-    dictionary format* version (kAUPresetVersionKey), not the plugin's
-    software version -- it is not the same kind of number as the installed
+    Version comparison (US16) is currently never flagged, by design, not
+    oversight: Logic's own recorded `version` (inside ``plugin.raw_plist``)
+    turned out, against real Logic projects, to almost always be 0 --
+    sampling a real multi-plugin session found 686 of 704 instances at
+    exactly 0, with the rare non-zero case still a tiny integer (1), nothing
+    like a release version such as "4.02". That is consistent with Apple's
+    own AU ClassInfo convention, where this key is a *preset dictionary
+    format* version (kAUPresetVersionKey), not the plugin's software version
+    -- it is not the same kind of number, in any case, as the installed
     component's own declared version (``installed_versions``, a real packed
-    major/minor/bugfix int). Comparing them literally whenever Logic's value
-    is 0 would flag a "mismatch" on nearly every third-party plugin in every
-    project, which is noise, not signal, and undermines exactly the trust
-    this flag exists to build. So a Logic-recorded version of 0 is treated
-    as "no version was usefully recorded" and never flagged; only a
-    non-zero recorded value is compared against the installed version.
+    major/minor/bugfix int). The two are from unrelated number spaces
+    regardless of whether Logic's value happens to be 0 or not: an early
+    version of this logic only suppressed the comparison when it was 0,
+    which fixed the 97% case but still spuriously "mismatched" the rare
+    non-zero case every time, since a preset-format version like 1 will
+    essentially never equal a packed bundle version like 262146 by chance.
+    That reproduced exactly the noise this flag exists to avoid, just for a
+    smaller slice. No field was found anywhere in a Logic plugin instance's
+    plist that reliably holds its software version, so the comparison is
+    disabled outright rather than narrowed further -- ``version_mismatch``
+    is always False today. ``logic_version``/``installed_version`` are still
+    populated on a transplanted outcome in case a genuine version source
+    turns up later; nothing currently reads them for a true/false judgement.
     """
     if not plugin.raw_plist_bytes:
         return TransplantOutcome(status="no_captured_state", reason=NO_CAPTURED_STATE_REASON)
@@ -93,15 +102,9 @@ def decide_transplant(
 
     logic_version = plugin.raw_plist.get("version") if isinstance(plugin.raw_plist, dict) else None
     installed_version = (installed_versions or {}).get(identity)
-    version_mismatch = (
-        isinstance(logic_version, int)
-        and logic_version != 0
-        and installed_version is not None
-        and installed_version != logic_version
-    )
     return TransplantOutcome(
         status="transplanted",
-        version_mismatch=version_mismatch,
+        version_mismatch=False,
         logic_version=logic_version,
         installed_version=installed_version,
     )

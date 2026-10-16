@@ -107,23 +107,30 @@ def test_decide_transplant_reports_not_installed_when_the_identity_is_missing():
     assert outcome.reason == "not installed as an Audio Unit on this machine"
 
 
-def test_decide_transplant_flags_a_version_mismatch_but_still_transplants():
-    """US16: a differing installed version is a flag to double-check, never a block."""
+def test_decide_transplant_never_flags_a_mismatch_even_when_versions_clearly_differ():
+    """US16 is currently unimplementable, not just suppressed for noisy cases: Logic's
+    recorded 'version' is Apple's AU ClassInfo preset-format-version key
+    (kAUPresetVersionKey), not the plugin's software version -- an earlier version of
+    this logic only suppressed the comparison when Logic recorded 0 (~97% of real
+    instances sampled), but still spuriously "mismatched" the rare non-zero case every
+    time, since a preset-format version like 1 or 3 will essentially never equal a
+    packed bundle version like 262146 by chance -- the two are unrelated number spaces
+    regardless of whether Logic's value happens to be 0. No reliable software-version
+    field was found anywhere in a Logic plugin instance's plist, so the comparison is
+    disabled outright: version_mismatch is always False, even here where the two
+    numbers plainly differ. logic_version/installed_version are still populated for a
+    transplanted outcome in case a genuine version source turns up later."""
     plugin = _plugin(raw_plist={"version": 3})
     outcome = decide_transplant(
         plugin, _INSTALLED, installed_versions={("aufx", "SthB", "OekS"): 262146},
     )
     assert outcome.status == "transplanted"
-    assert outcome.version_mismatch is True
+    assert outcome.version_mismatch is False
     assert outcome.logic_version == 3
     assert outcome.installed_version == 262146
 
 
 def test_decide_transplant_does_not_flag_a_mismatch_when_logic_recorded_no_version():
-    """Real Logic projects were sampled and found this field at 0 for ~97% of third-party
-    plugin instances -- it's Apple's AU ClassInfo preset-format-version key, not the
-    plugin's own software version, so 0 means "nothing usable was recorded", not "version
-    0". Flagging on it would mark almost every plugin as mismatched -- noise, not signal."""
     plugin = _plugin(raw_plist={"version": 0})
     outcome = decide_transplant(
         plugin, _INSTALLED, installed_versions={("aufx", "SthB", "OekS"): 262146},

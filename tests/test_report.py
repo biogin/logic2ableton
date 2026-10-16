@@ -137,7 +137,11 @@ def test_report_shows_the_platform_unsupported_fallback_reason():
     assert "not transplanted: this platform has no Audio Unit support" in report
 
 
-def test_report_flags_a_version_mismatch_on_a_transplanted_instance():
+def test_report_never_shows_a_version_mismatch_even_when_versions_plainly_differ():
+    """See decide_transplant's docstring: Logic's recorded 'version' is a preset-format
+    key, not a software version, so it's never comparable to the installed version --
+    the report must never print a VERSION MISMATCH note, even here where the two
+    numbers look obviously different."""
     plugin = _transplantable_plugin(raw_plist={"version": 3})
     project = _demo_project(plugins=[plugin], track_names_by_id={100: "Vox"})
     match = PluginMatch(logic_plugin_name="Soothe2", preset_name="", category="", character="")
@@ -151,7 +155,7 @@ def test_report_flags_a_version_mismatch_on_a_transplanted_instance():
         report = generate_report(project, [match])
 
     assert "-> Transplanted: exact Logic state carried over" in report
-    assert "VERSION MISMATCH: Logic used version 3, 4.0.2 is installed here; double-check the result" in report
+    assert "VERSION MISMATCH" not in report
 
 
 def test_report_contains_compatibility_warnings():
