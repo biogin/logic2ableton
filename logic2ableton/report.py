@@ -8,7 +8,7 @@ from logic2ableton.au_registry import (
     installed_au_component_versions,
     installed_au_components,
 )
-from logic2ableton.au_transplant import decide_transplant, missing_instrument
+from logic2ableton.au_transplant import INSTRUMENT_AU_TYPE, decide_transplant, missing_instrument
 from logic2ableton.logic_parser import format_smpte
 from logic2ableton.models import HardwareOutput, LogicProject, PluginInstance, TrackMixerState
 from logic2ableton.plugin_matcher import PluginMatch
@@ -327,7 +327,7 @@ def generate_report(
             )
             consequence = (
                 "track auto-muted, see AUTO-MUTED TRACKS above"
-                if plugin.au_type == "aumu"
+                if plugin.au_type == INSTRUMENT_AU_TYPE
                 else "rest of the chain plays without it"
             )
             lines.append(f"    -> Suggested: {suggestions} (not transplanted: {outcome.reason}; {consequence})")

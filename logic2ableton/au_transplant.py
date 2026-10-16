@@ -112,8 +112,9 @@ def decide_transplant(
 
 # The only AU type that reliably means "this channel strip's sole sound source" --
 # aumf ("Music Effect") is MIDI-aware but still processes a signal that exists
-# independent of it (FabFilter Pro-Q 4, a pure EQ, is aumf). See CONTEXT.md.
-_INSTRUMENT_AU_TYPE = "aumu"
+# independent of it (FabFilter Pro-Q 4, a pure EQ, is aumf). See CONTEXT.md's
+# "Instrument plugin" / "Effect plugin" glossary entries for the full distinction.
+INSTRUMENT_AU_TYPE = "aumu"
 
 
 def missing_instrument(
@@ -131,9 +132,18 @@ def missing_instrument(
     instance in ``plugins`` can have this type; this is the shared decision
     both the writer (to mute the destination track) and the report (to say
     why) call, so they can never disagree -- same pattern as decide_transplant.
+
+    ``installed_versions`` is safe to omit here (the writer does, the report
+    doesn't): it only ever changes decide_transplant's ``version_mismatch``/
+    ``logic_version``/``installed_version`` fields on a "transplanted"
+    outcome, which this function discards -- it only looks at ``status``,
+    and only ever returns non-None for a non-transplanted one. If
+    decide_transplant is ever changed to let installed_versions affect
+    ``status`` itself, every caller here needs re-checking, not just the
+    ones passing it today.
     """
     for plugin in plugins:
-        if plugin.au_type != _INSTRUMENT_AU_TYPE:
+        if plugin.au_type != INSTRUMENT_AU_TYPE:
             continue
         outcome = decide_transplant(
             plugin, installed_components, installed_versions=installed_versions, platform_supported=platform_supported,
