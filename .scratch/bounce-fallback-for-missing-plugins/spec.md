@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: deferred — superseded for MVP by `.scratch/instrument-auto-mute-fallback/spec.md`; see `docs/adr/0001-auto-mute-over-bounce-for-missing-instrument-fallback.md` for why. Not discarded: a real option if a richer, edit-equivalent fallback is ever worth the manual-export precondition this spec requires.
 
 # Bounce fallback for plugins missing on the recipient's machine
 
