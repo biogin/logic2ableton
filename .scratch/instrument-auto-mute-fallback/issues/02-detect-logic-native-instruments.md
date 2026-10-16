@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately) — extends ticket 01's already-merged mechanism, doesn't depend on new work.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] A channel strip with `kind == 0x43` and zero extracted `aumu`-type plugin instances triggers the same auto-mute (`_force_mute`) as ticket 01's "found an instrument, it failed to transplant" case.
 - [ ] Report wording for this case is honest about not knowing what the instrument is — e.g. "instrument not identified (likely a Logic-native instrument)" — distinct from ticket 01's existing "missing instrument (`<manufacturer>/<subtype>`)" wording, which implies a specific, known plugin.
@@ -13,6 +13,16 @@
 - [ ] Verified empirically during implementation whether Drummer / Drum Machine Designer tracks follow the same `kind == 0x43` pattern as a regular instrument strip. If yes, note it as free coverage in the Answer section. If no, disclose explicitly rather than silently assume coverage — same "never silently drop" standard as everything else in this codebase.
 - [ ] Verified against real data: confirms this correctly fires for real Logic-native-instrument tracks found during this session's investigation (the "Juno 60 emulation" track, and the pattern observed across Studio Violas/Violins/Cellos and similar tracks in other real sampled projects) — not just synthetic fixtures.
 - [ ] Tests cover: a `kind=0x43` strip with zero `aumu` instances (new path), a `kind=0x43` strip with a found-but-failed `aumu` instance (existing ticket 01 path, confirmed unaffected), a `kind=0x43` strip with a successfully-transplanted `aumu` instance (no mute, either path), and a non-instrument-kind strip (e.g. `0x40` audio) with no plugins at all (never muted by this mechanism).
+
+## Answer
+
+Implemented via a new `has_undetected_instrument(strip_kind, plugins)` in `au_transplant.py`: true when `strip_kind == 0x43` (instrument) and zero `aumu`-typed instances exist in `plugins` at all. Threaded the channel strip's `kind` field through to `TrackMixerState.kind` (new field, populated in `logic_parser.py`'s `_strip_mixer_state`) since it wasn't previously carried past the decoder layer. Wired into both the audio-track and MIDI-track loops in `ableton_generator.py` via a new `_needs_auto_mute()` helper that checks `missing_instrument()` first, then `has_undetected_instrument()` — and critically, now runs for every track regardless of whether it has any extracted plugins at all (previously the whole auto-mute check was skipped for a track with zero extracted plugins, which is exactly what a Logic-native-instrument-only track looks like). `report.py`'s `_auto_muted_tracks()` now returns `dict[str, PluginInstance | None]`, with `None` meaning "undetected" — rendered as "instrument not identified (likely a Logic-native instrument)", kept distinguishable from the existing named-plugin wording.
+
+Verified against real data: confirmed `has_undetected_instrument` returns `True` for the real "Juno 60 emulation" track in `weeknd.logicx` (strip kind `0x43`, zero `aumu` instances among its 5 extracted effect plugins).
+
+Drummer / Drum Machine Designer: **not verified** — swept ~50 real projects for drum-related track names and found none that were genuine Drummer tracks (all matches were sample/loop-named audio tracks, not MIDI instrument tracks). Disclosing this honestly rather than claiming coverage: if a Drummer track's channel strip also reads as `kind == 0x43`, it gets the same free coverage; if Logic gives it a different strip kind, it remains undetected until someone checks a real Drummer-track project.
+
+Tests added: `has_undetected_instrument` unit tests (4) in `test_au_transplant.py`; generator-level tests for both the audio- and MIDI-track loops, plus a non-instrument-strip negative case, in `test_ableton_generator.py`; report-wording tests (distinct "not identified" case, and a negative case) in `test_report.py`. Full suite: 696 passed, 61 skipped, same 2 pre-existing unrelated failures as before this ticket (a real VST3 plugin on this machine leaking into isolation tests).
 
 ## Further notes
 

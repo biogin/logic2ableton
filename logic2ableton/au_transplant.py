@@ -153,6 +153,34 @@ def missing_instrument(
     return None
 
 
+# AuCO +40 (see logic_project_data.py's AuCO notes): the channel strip type
+# that means "this track has a software instrument slot."
+INSTRUMENT_STRIP_KIND = 0x43
+
+
+def has_undetected_instrument(strip_kind: int | None, plugins: list[PluginInstance]) -> bool:
+    """True when a channel strip is instrument-typed but none of the plugin
+    instances extracted for it are an instrument at all -- not "found but
+    failed" (that's missing_instrument's job), genuinely none found.
+
+    Logic's own stock instruments (ES2, Alchemy, Sampler, Drummer, ...) don't
+    serialize as an embedded AU-state plist the way third-party AU plugins
+    do -- confirmed empirically against real projects: a note-bearing track
+    clearly driven by an instrument yielded several extracted effect
+    instances and zero instrument ones, with nothing else found anywhere in
+    that channel strip's byte range. extract_plugins() simply never sees
+    them, so missing_instrument() alone can't catch this case -- it only
+    ever looks at what was extracted. The channel strip's own ``kind`` field
+    (already decoded since the au-plugin-state-transplant spec's ticket 01)
+    is the one signal available that doesn't depend on identifying the
+    plugin at all: strip kind 0x43 means "this track needs a sound source,"
+    independent of whether that source is visible to us.
+    """
+    if strip_kind != INSTRUMENT_STRIP_KIND:
+        return False
+    return not any(plugin.au_type == INSTRUMENT_AU_TYPE for plugin in plugins)
+
+
 def _display_name(plugin: PluginInstance) -> str:
     """The plugin's own product name, never its preset name.
 

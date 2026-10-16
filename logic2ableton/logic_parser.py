@@ -1397,6 +1397,7 @@ def _strip_mixer_state(strip: LogicChannelStrip) -> TrackMixerState:
         volume_db=max(_MIXER_MIN_VOLUME_DB, min(_MIXER_MAX_VOLUME_DB, strip.volume_db)),
         pan=strip.pan_position,
         is_muted=strip.muted,
+        kind=strip.kind,
     )
 
 

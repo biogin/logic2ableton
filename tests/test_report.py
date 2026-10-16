@@ -188,6 +188,33 @@ def test_report_distinguishes_a_logic_mute_from_an_auto_mute():
     assert "AUTO-MUTED TRACKS" not in report
 
 
+def test_report_lists_a_track_auto_muted_for_an_undetected_logic_native_instrument():
+    """Real case found this session: a note-bearing track whose instrument never
+    shows up as an extracted plugin instance at all. The wording must stay honest --
+    distinct from the "missing instrument (<manufacturer>/<subtype>)" case above,
+    since no specific plugin was ever identified here."""
+    project = _demo_project(mixer_from_project=True)
+    project.mixer_state = {"Synth": TrackMixerState(kind=0x43)}
+
+    with patch("logic2ableton.report.installed_au_components", return_value=set()), \
+         patch("logic2ableton.report.installed_au_component_versions", return_value={}), \
+         patch("logic2ableton.report.au_platform_supported", return_value=True):
+        report = generate_report(project, [])
+
+    assert "AUTO-MUTED TRACKS (1):" in report
+    assert "Synth: instrument not identified (likely a Logic-native instrument)" in report
+    assert "missing instrument (" not in report
+
+
+def test_report_does_not_auto_mute_a_non_instrument_strip_with_no_plugins():
+    project = _demo_project(mixer_from_project=True)
+    project.mixer_state = {"Vox": TrackMixerState(kind=0x40)}
+
+    report = generate_report(project, [])
+
+    assert "AUTO-MUTED TRACKS" not in report
+
+
 def test_report_has_no_auto_muted_section_when_nothing_is_missing():
     plugin = _transplantable_plugin(au_type="aumu", au_subtype="XfsX", au_manufacturer="XFER")
     project = _demo_project(plugins=[plugin], track_names_by_id={100: "Synth"})

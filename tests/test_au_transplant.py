@@ -1,7 +1,13 @@
 import struct
 import xml.etree.ElementTree as ET
 
-from logic2ableton.au_transplant import au_identity_ints, decide_transplant, make_au_plugin_device, missing_instrument
+from logic2ableton.au_transplant import (
+    au_identity_ints,
+    decide_transplant,
+    has_undetected_instrument,
+    make_au_plugin_device,
+    missing_instrument,
+)
 from logic2ableton.models import PluginInstance
 
 
@@ -178,3 +184,30 @@ def test_missing_instrument_ignores_a_failed_aumf_even_though_it_is_midi_aware()
     FabFilter Pro-Q 4, a pure EQ, is aumf -- so it must never trigger auto-mute."""
     midi_aware_effect = _plugin(au_type="aumf", au_subtype="FQ4p", au_manufacturer="FabF")
     assert missing_instrument([midi_aware_effect], installed_components=set()) is None
+
+
+_INSTRUMENT_STRIP = 0x43
+_AUDIO_STRIP = 0x40
+
+
+def test_has_undetected_instrument_true_for_an_instrument_strip_with_no_aumu_at_all():
+    """Real case: a note-bearing track whose channel strip yielded several extracted
+    effect instances and zero instrument ones -- Logic's own stock instruments don't
+    serialize as an embedded AU-state plist, so extract_plugins() never sees them."""
+    effects_only = [_plugin(au_type="aufx"), _plugin(au_type="aumf", au_subtype="FQ4p", au_manufacturer="FabF")]
+    assert has_undetected_instrument(_INSTRUMENT_STRIP, effects_only) is True
+
+
+def test_has_undetected_instrument_false_when_an_aumu_was_actually_found():
+    """Even a found-but-failed aumu means this isn't 'undetected' -- that's
+    missing_instrument's case, with its own, more specific report wording."""
+    found_instrument = [_plugin(au_type="aumu", au_subtype="XfsX", au_manufacturer="XFER")]
+    assert has_undetected_instrument(_INSTRUMENT_STRIP, found_instrument) is False
+
+
+def test_has_undetected_instrument_false_for_a_non_instrument_strip_kind():
+    assert has_undetected_instrument(_AUDIO_STRIP, []) is False
+
+
+def test_has_undetected_instrument_false_for_an_unknown_strip_kind():
+    assert has_undetected_instrument(None, []) is False

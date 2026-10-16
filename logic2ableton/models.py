@@ -34,6 +34,13 @@ class TrackMixerState:
     pan: float = 0.0
     is_muted: bool = False
     is_soloed: bool = False
+    # The Logic channel strip's own type (0x43 = "instrument"; see
+    # logic_project_data.py's AuCO notes). Carried here, not just decoded and
+    # dropped, so a track's own strip kind travels with its other per-track
+    # data -- needed to recognize a Logic-native instrument that never shows
+    # up as an extracted plugin instance at all (see au_transplant.py's
+    # has_undetected_instrument).
+    kind: int | None = None
 
     @property
     def volume_linear(self) -> float:

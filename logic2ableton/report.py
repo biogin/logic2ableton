@@ -8,7 +8,12 @@ from logic2ableton.au_registry import (
     installed_au_component_versions,
     installed_au_components,
 )
-from logic2ableton.au_transplant import INSTRUMENT_AU_TYPE, decide_transplant, missing_instrument
+from logic2ableton.au_transplant import (
+    INSTRUMENT_AU_TYPE,
+    decide_transplant,
+    has_undetected_instrument,
+    missing_instrument,
+)
 from logic2ableton.logic_parser import format_smpte
 from logic2ableton.models import HardwareOutput, LogicProject, PluginInstance, TrackMixerState
 from logic2ableton.plugin_matcher import PluginMatch
@@ -77,19 +82,32 @@ def _auto_muted_tracks(
     installed_components: set[tuple[str, str, str]],
     installed_versions: dict[tuple[str, str, str], int],
     platform_supported: bool,
-) -> dict[str, PluginInstance]:
+) -> dict[str, PluginInstance | None]:
     """Track name -> the instrument instance that didn't transplant, for every track
-    generate_als will auto-mute. Computed the same way the writer decides it, from
-    project.plugins directly -- not from the generated .als -- so this works from
-    --report-only too, before any .als exists."""
-    muted = {}
-    for track_name, plugins in _plugins_by_track(project).items():
+    generate_als will auto-mute, or None when the track's strip is instrument-typed
+    but no instance was ever extracted for it at all (Logic's own stock instruments --
+    see au_transplant.has_undetected_instrument). Computed the same way the writer
+    decides it, from project.plugins directly -- not from the generated .als -- so
+    this works from --report-only too, before any .als exists."""
+    muted: dict[str, PluginInstance | None] = {}
+    plugins_by_track = _plugins_by_track(project)
+    mixer_state = project.mixer_state or {}
+    for track_name, plugins in plugins_by_track.items():
         instrument = missing_instrument(
             plugins, installed_components,
             installed_versions=installed_versions, platform_supported=platform_supported,
         )
         if instrument is not None:
             muted[track_name] = instrument
+            continue
+        strip = mixer_state.get(track_name)
+        if has_undetected_instrument(strip.kind if strip is not None else None, plugins):
+            muted[track_name] = None
+    for track_name, strip in mixer_state.items():
+        if track_name in plugins_by_track:
+            continue
+        if has_undetected_instrument(strip.kind, []):
+            muted[track_name] = None
     return muted
 
 
@@ -285,7 +303,10 @@ def generate_report(
             "and unmute to hear it."
         )
         for track_name, instrument in auto_muted.items():
-            lines.append(f"  {track_name}: missing instrument ({instrument.au_manufacturer}/{instrument.au_subtype})")
+            if instrument is not None:
+                lines.append(f"  {track_name}: missing instrument ({instrument.au_manufacturer}/{instrument.au_subtype})")
+            else:
+                lines.append(f"  {track_name}: instrument not identified (likely a Logic-native instrument)")
         lines.append("")
 
     lines.append(f"PLUGINS FOUND ({len(plugin_matches)}):")

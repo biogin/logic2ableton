@@ -1001,6 +1001,47 @@ def test_generate_als_does_not_mute_a_track_whose_only_failure_is_an_effect(tmp_
     assert speaker.get("Value") == "true"
 
 
+_INSTRUMENT_STRIP_KIND = 0x43
+_AUDIO_STRIP_KIND = 0x40
+
+
+def test_generate_als_auto_mutes_a_track_with_a_logic_native_instrument(tmp_path):
+    """Real case found this session: a note-bearing track whose channel strip's
+    instrument never shows up as an extracted plugin instance at all (Logic's own
+    stock instruments don't serialize as an embedded AU-state plist) -- the strip's
+    own kind (0x43, "instrument") is the only signal available, since there is no
+    plugin instance to check."""
+    project = _timeline_project("StockInstrument", ["Synth"], [])
+    project.track_names_by_id = {1: "Synth"}
+    project.plugins = []
+    project.mixer_state = {"Synth": TrackMixerState(kind=_INSTRUMENT_STRIP_KIND)}
+
+    with patch("logic2ableton.ableton_generator.installed_au_components", return_value=set()):
+        als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(t for t in root.iter("AudioTrack") if t.find(".//Name/EffectiveName").get("Value") == "Synth")
+    speaker = track.find("DeviceChain/Mixer/Speaker/Manual")
+    assert speaker.get("Value") == "false"
+
+
+def test_generate_als_does_not_mute_a_non_instrument_strip_with_no_plugins(tmp_path):
+    project = _timeline_project("PlainAudioTrack", ["Vox"], [])
+    project.track_names_by_id = {1: "Vox"}
+    project.plugins = []
+    project.mixer_state = {"Vox": TrackMixerState(kind=_AUDIO_STRIP_KIND)}
+
+    with patch("logic2ableton.ableton_generator.installed_au_components", return_value=set()):
+        als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(t for t in root.iter("AudioTrack") if t.find(".//Name/EffectiveName").get("Value") == "Vox")
+    speaker = track.find("DeviceChain/Mixer/Speaker/Manual")
+    assert speaker.get("Value") == "true"
+
+
 def test_generate_als_auto_mute_preserves_the_midi_performance_untouched(tmp_path):
     """Auto-mute must only change the mute state -- the original MIDI performance
     stays intact so a collaborator can load their own instrument and unmute."""
@@ -1023,6 +1064,28 @@ def test_generate_als_auto_mute_preserves_the_midi_performance_untouched(tmp_pat
     assert len(note_events) == 1
     assert note_events[0].get("Time") == "0"
     assert note_events[0].get("Duration") == "1"
+
+
+def test_generate_als_auto_mutes_a_midi_track_with_a_logic_native_instrument(tmp_path):
+    """Same detection, MIDI-track loop: a kind=0x43 strip with zero extracted
+    plugins at all must still be recognized, not just the audio-track loop."""
+    project = _timeline_project("StockInstrumentMidi", [], [])
+    project.track_names_by_id = {1: "Synth"}
+    project.midi_tracks = [
+        LogicMidiTrack(name="Synth", notes=[LogicMidiNote(pitch=60, start_beats=0.0, duration_beats=1.0, velocity=100)]),
+    ]
+    project.plugins = []
+    project.mixer_state = {"Synth": TrackMixerState(kind=_INSTRUMENT_STRIP_KIND)}
+
+    with patch("logic2ableton.ableton_generator.installed_au_components", return_value=set()):
+        als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(t for t in root.iter("MidiTrack") if t.find(".//Name/EffectiveName").get("Value") == "Synth")
+    speaker = track.find("DeviceChain/Mixer/Speaker/Manual")
+    assert speaker.get("Value") == "false"
+    assert len(track.findall(".//MidiNoteEvent")) == 1
 
 
 def test_generate_als_locators_schema_and_order(tmp_path):
