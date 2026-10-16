@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 from logic2ableton.audio import read_audio_info
 from logic2ableton.ableton_metadata import encode_meter, set_global_parameter, set_tempo_automation, set_track_automation
 from logic2ableton.au_registry import installed_au_components
-from logic2ableton.au_transplant import make_au_plugin_device
+from logic2ableton.au_transplant import decide_transplant, make_au_plugin_device
 from logic2ableton.paths import create_output_directory, safe_name
 from logic2ableton.timeline import TempoMap, beats_per_bar
 
@@ -371,15 +371,18 @@ def _insert_transplanted_plugins(
     conversion for a plugin it can't transplant. ``plugins`` must already be
     in insert-chain order. Returns how many were inserted, for the caller's
     reporting.
+
+    The insert/skip decision itself comes from au_transplant.decide_transplant
+    -- the same function report.py uses -- so the generated .als and the
+    report it's paired with can never disagree about which instances were
+    actually transplanted.
     """
     devices = track.find("DeviceChain/DeviceChain/Devices")
     if devices is None:
         return 0
     inserted = 0
     for plugin in plugins:
-        if not plugin.raw_plist_bytes:
-            continue
-        if (plugin.au_type, plugin.au_subtype, plugin.au_manufacturer) not in installed_components:
+        if decide_transplant(plugin, installed_components).status != "transplanted":
             continue
         device = make_au_plugin_device(
             plugin,
