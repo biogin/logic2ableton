@@ -8,9 +8,9 @@ from logic2ableton.au_registry import (
     installed_au_component_versions,
     installed_au_components,
 )
-from logic2ableton.au_transplant import decide_transplant
+from logic2ableton.au_transplant import decide_transplant, missing_instrument
 from logic2ableton.logic_parser import format_smpte
-from logic2ableton.models import HardwareOutput, LogicProject, TrackMixerState
+from logic2ableton.models import HardwareOutput, LogicProject, PluginInstance, TrackMixerState
 from logic2ableton.plugin_matcher import PluginMatch
 from logic2ableton.timeline import beats_per_bar
 
@@ -50,6 +50,47 @@ def _bar_beat(beat: float, numerator: int, denominator: int) -> tuple[int, float
     bar = int(beat // bar_length_beats) + 1
     beat_in_bar = (beat % bar_length_beats) + 1
     return bar, beat_in_bar
+
+
+def _plugins_by_track(project: LogicProject) -> dict[str, list[PluginInstance]]:
+    """project.plugins grouped by destination track name, each group in insert-chain
+    order -- same grouping ableton_generator.generate_als builds, needed here too so
+    the report can ask the same "does this track have a missing instrument" question
+    the writer already answered, independently (see decide_transplant's docstring for
+    why this stays two independent callers of shared logic rather than one computing
+    it for the other)."""
+    by_track: dict[str, list[PluginInstance]] = {}
+    for plugin in project.plugins:
+        if plugin.track_id is None:
+            continue
+        track_name = project.track_names_by_id.get(plugin.track_id)
+        if track_name is None:
+            continue
+        by_track.setdefault(track_name, []).append(plugin)
+    for plugins in by_track.values():
+        plugins.sort(key=lambda p: p.insert_slot if p.insert_slot is not None else 0)
+    return by_track
+
+
+def _auto_muted_tracks(
+    project: LogicProject,
+    installed_components: set[tuple[str, str, str]],
+    installed_versions: dict[tuple[str, str, str], int],
+    platform_supported: bool,
+) -> dict[str, PluginInstance]:
+    """Track name -> the instrument instance that didn't transplant, for every track
+    generate_als will auto-mute. Computed the same way the writer decides it, from
+    project.plugins directly -- not from the generated .als -- so this works from
+    --report-only too, before any .als exists."""
+    muted = {}
+    for track_name, plugins in _plugins_by_track(project).items():
+        instrument = missing_instrument(
+            plugins, installed_components,
+            installed_versions=installed_versions, platform_supported=platform_supported,
+        )
+        if instrument is not None:
+            muted[track_name] = instrument
+    return muted
 
 
 def _mixer_parts(state: TrackMixerState) -> list[str]:
@@ -210,6 +251,20 @@ def generate_report(
         lines.append(f"  {i}. {track_name}{detail}")
     lines.append("")
 
+    # Scanned once for the whole report, not once per plugin instance -- same
+    # reasoning as ableton_generator.generate_als: a project can carry dozens
+    # of third-party plugin instances, and each scan reparses every AU
+    # bundle's Info.plist. Skipped entirely when nothing has captured state
+    # to transplant, so a project (or test) with no raw_plist_bytes never
+    # touches the filesystem for this. Computed before the mixer section
+    # since auto-muted tracks are reported there, ahead of PLUGINS FOUND's
+    # per-instance detail.
+    needs_au_scan = any(plugin.raw_plist_bytes for plugin in project.plugins)
+    platform_supported = au_platform_supported()
+    installed_components = installed_au_components() if needs_au_scan else set()
+    installed_versions = installed_au_component_versions() if needs_au_scan else {}
+    auto_muted = _auto_muted_tracks(project, installed_components, installed_versions, platform_supported)
+
     if project.mixer_state and project.mixer_from_project:
         lines.extend(_mixer_lines(project, keep_outputs))
     elif project.mixer_state:
@@ -221,20 +276,22 @@ def generate_report(
         lines.append("  Tip: use --mixer mixer_overrides.json to set per-track levels")
     lines.append("")
 
+    if auto_muted:
+        lines.append(f"AUTO-MUTED TRACKS ({len(auto_muted)}):")
+        lines.append(
+            "  These are muted by the converter, not by you in Logic -- each track's instrument "
+            "(its only sound source) could not be transplanted, so there is nothing else on the "
+            "channel strip to play. The original MIDI performance is untouched; load any instrument "
+            "and unmute to hear it."
+        )
+        for track_name, instrument in auto_muted.items():
+            lines.append(f"  {track_name}: missing instrument ({instrument.au_manufacturer}/{instrument.au_subtype})")
+        lines.append("")
+
     lines.append(f"PLUGINS FOUND ({len(plugin_matches)}):")
     # match_plugins() builds plugin_matches by iterating project.plugins in
     # order, one match per plugin -- zip relies on that index alignment.
     assert len(project.plugins) == len(plugin_matches), "plugin_matches must be match_plugins(project.plugins, ...)"
-    # Scanned once for the whole report, not once per plugin instance -- same
-    # reasoning as ableton_generator.generate_als: a project can carry dozens
-    # of third-party plugin instances, and each scan reparses every AU
-    # bundle's Info.plist. Skipped entirely when nothing has captured state
-    # to transplant, so a project (or test) with no raw_plist_bytes never
-    # touches the filesystem for this.
-    needs_au_scan = any(plugin.raw_plist_bytes for plugin in project.plugins)
-    platform_supported = au_platform_supported()
-    installed_components = installed_au_components() if needs_au_scan else set()
-    installed_versions = installed_au_component_versions() if needs_au_scan else {}
     transplanted_count = 0
     for plugin, match in zip(project.plugins, plugin_matches):
         preset = (
@@ -268,7 +325,12 @@ def generate_report(
                 if match.suggested_vst3s
                 else "(no match found)"
             )
-            lines.append(f"    -> Suggested: {suggestions} (not transplanted: {outcome.reason})")
+            consequence = (
+                "track auto-muted, see AUTO-MUTED TRACKS above"
+                if plugin.au_type == "aumu"
+                else "rest of the chain plays without it"
+            )
+            lines.append(f"    -> Suggested: {suggestions} (not transplanted: {outcome.reason}; {consequence})")
     lines.append("")
 
     midi_tracks = [t for t in project.midi_tracks if t.note_count > 0]

@@ -110,6 +110,39 @@ def decide_transplant(
     )
 
 
+# The only AU type that reliably means "this channel strip's sole sound source" --
+# aumf ("Music Effect") is MIDI-aware but still processes a signal that exists
+# independent of it (FabFilter Pro-Q 4, a pure EQ, is aumf). See CONTEXT.md.
+_INSTRUMENT_AU_TYPE = "aumu"
+
+
+def missing_instrument(
+    plugins: list[PluginInstance],
+    installed_components: set[tuple[str, str, str]],
+    *,
+    installed_versions: dict[tuple[str, str, str], int] | None = None,
+    platform_supported: bool = True,
+) -> PluginInstance | None:
+    """A channel strip's instrument plugin instance, if it has one and it didn't
+    transplant -- the one case where nothing else on that strip has anything to
+    process without it (see docs/adr/0001-auto-mute-over-bounce-for-missing-instrument-fallback.md).
+
+    A channel strip has at most one instrument slot in Logic, so at most one
+    instance in ``plugins`` can have this type; this is the shared decision
+    both the writer (to mute the destination track) and the report (to say
+    why) call, so they can never disagree -- same pattern as decide_transplant.
+    """
+    for plugin in plugins:
+        if plugin.au_type != _INSTRUMENT_AU_TYPE:
+            continue
+        outcome = decide_transplant(
+            plugin, installed_components, installed_versions=installed_versions, platform_supported=platform_supported,
+        )
+        if outcome.status != "transplanted":
+            return plugin
+    return None
+
+
 def _display_name(plugin: PluginInstance) -> str:
     """The plugin's own product name, never its preset name.
 

@@ -110,7 +110,10 @@ def test_report_shows_the_not_installed_fallback_reason():
          patch("logic2ableton.report.au_platform_supported", return_value=True):
         report = generate_report(project, [match])
 
-    assert "-> Suggested: Fresh Air (not transplanted: not installed as an Audio Unit on this machine)" in report
+    assert (
+        "-> Suggested: Fresh Air (not transplanted: not installed as an Audio Unit on this machine; "
+        "rest of the chain plays without it)"
+    ) in report
     assert "Plugin settings/parameters (not compatible across DAWs)" in report
 
 
@@ -156,6 +159,47 @@ def test_report_never_shows_a_version_mismatch_even_when_versions_plainly_differ
 
     assert "-> Transplanted: exact Logic state carried over" in report
     assert "VERSION MISMATCH" not in report
+
+
+def test_report_lists_a_track_auto_muted_for_a_missing_instrument():
+    instrument = _transplantable_plugin(au_type="aumu", au_subtype="XfsX", au_manufacturer="XFER")
+    project = _demo_project(plugins=[instrument], track_names_by_id={100: "Synth"})
+    match = PluginMatch(logic_plugin_name="Serum", preset_name="", category="", character="")
+
+    with patch("logic2ableton.report.installed_au_components", return_value=set()), \
+         patch("logic2ableton.report.installed_au_component_versions", return_value={}), \
+         patch("logic2ableton.report.au_platform_supported", return_value=True):
+        report = generate_report(project, [match])
+
+    assert "AUTO-MUTED TRACKS (1):" in report
+    assert "Synth: missing instrument (XFER/XfsX)" in report
+    assert "track auto-muted, see AUTO-MUTED TRACKS above" in report
+
+
+def test_report_distinguishes_a_logic_mute_from_an_auto_mute():
+    """A track muted in Logic itself, with no missing plugin at all, must never show up
+    in AUTO-MUTED TRACKS -- that section is only for the converter's own decision."""
+    project = _demo_project(mixer_from_project=True)
+    project.mixer_state = {"Vox": TrackMixerState(is_muted=True)}
+
+    report = generate_report(project, [])
+
+    assert "MUTED" in report
+    assert "AUTO-MUTED TRACKS" not in report
+
+
+def test_report_has_no_auto_muted_section_when_nothing_is_missing():
+    plugin = _transplantable_plugin(au_type="aumu", au_subtype="XfsX", au_manufacturer="XFER")
+    project = _demo_project(plugins=[plugin], track_names_by_id={100: "Synth"})
+    match = PluginMatch(logic_plugin_name="Serum", preset_name="", category="", character="")
+
+    installed = {("aumu", "XfsX", "XFER")}
+    with patch("logic2ableton.report.installed_au_components", return_value=installed), \
+         patch("logic2ableton.report.installed_au_component_versions", return_value={}), \
+         patch("logic2ableton.report.au_platform_supported", return_value=True):
+        report = generate_report(project, [match])
+
+    assert "AUTO-MUTED TRACKS" not in report
 
 
 def test_report_contains_compatibility_warnings():

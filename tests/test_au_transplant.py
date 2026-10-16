@@ -1,7 +1,7 @@
 import struct
 import xml.etree.ElementTree as ET
 
-from logic2ableton.au_transplant import au_identity_ints, decide_transplant, make_au_plugin_device
+from logic2ableton.au_transplant import au_identity_ints, decide_transplant, make_au_plugin_device, missing_instrument
 from logic2ableton.models import PluginInstance
 
 
@@ -153,3 +153,28 @@ def test_decide_transplant_does_not_flag_a_mismatch_when_versions_agree():
     )
     assert outcome.status == "transplanted"
     assert outcome.version_mismatch is False
+
+
+def test_missing_instrument_returns_the_instance_when_its_transplant_failed():
+    instrument = _plugin(au_type="aumu", au_subtype="XfsX", au_manufacturer="XFER")
+    effect = _plugin(au_type="aufx", au_subtype="SthB", au_manufacturer="OekS")
+    result = missing_instrument([effect, instrument], installed_components=set())
+    assert result is instrument
+
+
+def test_missing_instrument_returns_none_when_the_instrument_transplanted():
+    instrument = _plugin(au_type="aumu", au_subtype="XfsX", au_manufacturer="XFER")
+    installed = {("aumu", "XfsX", "XFER")}
+    assert missing_instrument([instrument], installed) is None
+
+
+def test_missing_instrument_returns_none_with_no_instrument_on_the_strip():
+    effect = _plugin(au_type="aufx", au_subtype="SthB", au_manufacturer="OekS")
+    assert missing_instrument([effect], installed_components=set()) is None
+
+
+def test_missing_instrument_ignores_a_failed_aumf_even_though_it_is_midi_aware():
+    """aumf ("Music Effect") processes a signal that exists independent of it --
+    FabFilter Pro-Q 4, a pure EQ, is aumf -- so it must never trigger auto-mute."""
+    midi_aware_effect = _plugin(au_type="aumf", au_subtype="FQ4p", au_manufacturer="FabF")
+    assert missing_instrument([midi_aware_effect], installed_components=set()) is None

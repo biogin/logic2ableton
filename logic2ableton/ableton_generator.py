@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 from logic2ableton.audio import read_audio_info
 from logic2ableton.ableton_metadata import encode_meter, set_global_parameter, set_tempo_automation, set_track_automation
 from logic2ableton.au_registry import au_platform_supported, installed_au_components
-from logic2ableton.au_transplant import decide_transplant, make_au_plugin_device
+from logic2ableton.au_transplant import decide_transplant, make_au_plugin_device, missing_instrument
 from logic2ableton.paths import create_output_directory, safe_name
 from logic2ableton.timeline import TempoMap, beats_per_bar
 
@@ -351,6 +351,25 @@ def _set_mixer_state(track: ET.Element, mixer_state: TrackMixerState | None) -> 
     solo_elem = mixer.find("SoloSink")
     if solo_elem is not None:
         solo_elem.set("Value", "true" if mixer_state.is_soloed else "false")
+
+
+def _force_mute(track: ET.Element) -> None:
+    """Mute a track directly, independent of any mixer-state data for it.
+
+    Used when a channel strip's instrument plugin can't transplant: nothing
+    else on that strip has anything to process without it, so the track is
+    muted automatically rather than left in Ableton's default "could not be
+    found" broken-device state. Reuses the same field _set_mixer_state does
+    (Speaker/Manual) -- not a new mute mechanism, just a second caller of it,
+    and applied after _set_mixer_state so it is never overridden by a Logic
+    mixer state that happened to read as unmuted.
+    """
+    mixer = track.find(".//DeviceChain/Mixer")
+    if mixer is None:
+        return
+    speaker_elem = mixer.find("Speaker/Manual")
+    if speaker_elem is not None:
+        speaker_elem.set("Value", "false")
 
 
 def _insert_transplanted_plugins(
@@ -1202,7 +1221,10 @@ def generate_als(
         if track_name in project.automation:
             set_track_automation(track, project.automation[track_name], allocator)
         if track_name in plugins_by_track_name:
-            _insert_transplanted_plugins(track, plugins_by_track_name[track_name], allocator, installed_components)
+            track_plugins = plugins_by_track_name[track_name]
+            _insert_transplanted_plugins(track, track_plugins, allocator, installed_components)
+            if missing_instrument(track_plugins, installed_components, platform_supported=au_platform_supported()):
+                _force_mute(track)
 
         made.append((track_name, track))
 
@@ -1235,9 +1257,10 @@ def generate_als(
                 if midi_track.name in project.automation:
                     set_track_automation(track, project.automation[midi_track.name], allocator)
                 if midi_track.name in plugins_by_track_name:
-                    _insert_transplanted_plugins(
-                        track, plugins_by_track_name[midi_track.name], allocator, installed_components,
-                    )
+                    track_plugins = plugins_by_track_name[midi_track.name]
+                    _insert_transplanted_plugins(track, track_plugins, allocator, installed_components)
+                    if missing_instrument(track_plugins, installed_components, platform_supported=au_platform_supported()):
+                        _force_mute(track)
                 made.append((midi_track.name, track))
 
     if keep_outputs:

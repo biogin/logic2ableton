@@ -953,6 +953,78 @@ def test_generate_als_scans_installed_au_components_once_not_per_plugin(tmp_path
     assert mocked.call_count == 1
 
 
+def test_generate_als_auto_mutes_a_track_whose_instrument_cannot_transplant(tmp_path):
+    project = _timeline_project("MissingInstrument", ["Synth"], [])
+    project.track_names_by_id = {1: "Synth"}
+    project.plugins = [_plugin_instance(au_type="aumu", au_subtype="XfsX", au_manufacturer="XFER")]
+
+    with patch("logic2ableton.ableton_generator.installed_au_components", return_value=set()):
+        als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(t for t in root.iter("AudioTrack") if t.find(".//Name/EffectiveName").get("Value") == "Synth")
+    speaker = track.find("DeviceChain/Mixer/Speaker/Manual")
+    assert speaker.get("Value") == "false"
+
+
+def test_generate_als_does_not_mute_a_track_whose_instrument_transplanted(tmp_path):
+    project = _timeline_project("InstrumentOk", ["Synth"], [])
+    project.track_names_by_id = {1: "Synth"}
+    project.plugins = [_plugin_instance(au_type="aumu", au_subtype="XfsX", au_manufacturer="XFER")]
+
+    installed = {("aumu", "XfsX", "XFER")}
+    with patch("logic2ableton.ableton_generator.installed_au_components", return_value=installed):
+        als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(t for t in root.iter("AudioTrack") if t.find(".//Name/EffectiveName").get("Value") == "Synth")
+    speaker = track.find("DeviceChain/Mixer/Speaker/Manual")
+    assert speaker.get("Value") == "true"
+
+
+def test_generate_als_does_not_mute_a_track_whose_only_failure_is_an_effect(tmp_path):
+    """A missing effect leaves the rest of the chain -- including the dry signal -- playing;
+    only a missing instrument (the strip's sole sound source) triggers auto-mute."""
+    project = _timeline_project("EffectOnlyFails", ["Vox"], [])
+    project.track_names_by_id = {1: "Vox"}
+    project.plugins = [_plugin_instance(au_type="aufx", au_subtype="SthB", au_manufacturer="OekS")]
+
+    with patch("logic2ableton.ableton_generator.installed_au_components", return_value=set()):
+        als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(t for t in root.iter("AudioTrack") if t.find(".//Name/EffectiveName").get("Value") == "Vox")
+    speaker = track.find("DeviceChain/Mixer/Speaker/Manual")
+    assert speaker.get("Value") == "true"
+
+
+def test_generate_als_auto_mute_preserves_the_midi_performance_untouched(tmp_path):
+    """Auto-mute must only change the mute state -- the original MIDI performance
+    stays intact so a collaborator can load their own instrument and unmute."""
+    project = _timeline_project("MissingInstrumentMidi", [], [])
+    project.track_names_by_id = {1: "Synth"}
+    project.midi_tracks = [
+        LogicMidiTrack(name="Synth", notes=[LogicMidiNote(pitch=60, start_beats=0.0, duration_beats=1.0, velocity=100)]),
+    ]
+    project.plugins = [_plugin_instance(au_type="aumu", au_subtype="XfsX", au_manufacturer="XFER")]
+
+    with patch("logic2ableton.ableton_generator.installed_au_components", return_value=set()):
+        als_path = generate_als(project, tmp_path / "out", copy_audio=False)
+    with gzip.open(als_path, "rb") as f:
+        root = ET.fromstring(f.read())
+
+    track = next(t for t in root.iter("MidiTrack") if t.find(".//Name/EffectiveName").get("Value") == "Synth")
+    speaker = track.find("DeviceChain/Mixer/Speaker/Manual")
+    assert speaker.get("Value") == "false"
+    note_events = track.findall(".//MidiNoteEvent")
+    assert len(note_events) == 1
+    assert note_events[0].get("Time") == "0"
+    assert note_events[0].get("Duration") == "1"
+
+
 def test_generate_als_locators_schema_and_order(tmp_path):
     project = _timeline_project("Locators", [], [])
     project.timeline = Timeline(
