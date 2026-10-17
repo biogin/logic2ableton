@@ -149,7 +149,7 @@ def _validate_logic_input(path: Path) -> str | None:
     suffix = path.suffix.lower()
     if suffix in _LEGACY_LOGIC_FORMATS:
         return (
-            f"'{path.name}' is {_LEGACY_LOGIC_FORMATS[suffix]}. logic2ableton reads .logicx "
+            f"'{path.name}' is {_LEGACY_LOGIC_FORMATS[suffix]}. logic2live reads .logicx "
             "packages, which Logic Pro X (10.0) and later save. Open the project in a current "
             "Logic Pro, choose File > Save As, and convert the .logicx it writes."
         )
@@ -184,7 +184,7 @@ def _validate_ableton_input(path: Path) -> str | None:
     if path.suffix.lower() != ".als":
         return (
             f"Expected an Ableton .als Live Set but got '{path.name}'. "
-            "Use logic2ableton for Logic .logicx projects."
+            "Use logic2live for Logic .logicx projects."
         )
     if not path.is_file():
         return f"'{path.name}' is not a readable .als file."
@@ -524,7 +524,7 @@ def _resolve_mode(argv: list[str]) -> tuple[str, list[str]] | None:
     known, remaining = bootstrap.parse_known_args(raw_args)
 
     if known.version:
-        print(f"logic2ableton {__version__}")
+        print(f"logic2live {__version__}")
         return None
 
     mode = explicit_mode or known.mode or _detect_mode(sys.argv[0], remaining)

@@ -3,9 +3,9 @@ requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "logic2ableton"
+name = "logic2live"
 dynamic = ["version"]
-description = "Session transfer between Logic Pro, Ableton Live, and Pro Tools - six conversion lanes with evidence-first reports"
+description = "Logic Pro to Ableton Live conversion that carries third-party plugin state, automation and mixer across (fork of logic2ableton)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -24,7 +24,7 @@ classifiers = [
 ]
 
 [project.scripts]
-logic2ableton = "logic2ableton.cli:main"
+logic2live = "logic2ableton.cli:main"
 ableton2logic = "logic2ableton.cli:main"
 protools2ableton = "logic2ableton.cli:main"
 protools2logic = "logic2ableton.cli:main"
@@ -32,9 +32,9 @@ ableton2protools = "logic2ableton.cli:main"
 logic2protools = "logic2ableton.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Evilander/logic2ableton"
-Repository = "https://github.com/Evilander/logic2ableton"
-Issues = "https://github.com/Evilander/logic2ableton/issues"
+Homepage = "https://github.com/biogin/logic2live"
+Repository = "https://github.com/biogin/logic2live"
+Upstream = "https://github.com/Evilander/logic2ableton"
 
 [tool.setuptools.packages.find]
 include = ["logic2ableton*"]

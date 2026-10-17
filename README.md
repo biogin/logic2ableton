@@ -1,8 +1,8 @@
-# logic2ableton (plugin-state fork)
+# logic2live
 
 **Move a Logic Pro project into Ableton Live without re-dialing every plugin.** Your third-party plugins open in Live with the exact settings you left them at in Logic — not factory defaults — alongside your audio, MIDI, tempo, mixer, and volume/pan automation.
 
-> This is a fork of [Evilander/logic2ableton](https://github.com/Evilander/logic2ableton) focused on Logic → Ableton fidelity. The `logic2ableton` package on PyPI and the upstream desktop app are the **original** tool and do **not** include anything listed under [What this fork adds](#what-this-fork-adds). Install from this repo to get them.
+> logic2live is a fork of [logic2ableton](https://github.com/Evilander/logic2ableton) built around Logic → Ableton fidelity. The `logic2ableton` package on PyPI and its desktop app are the **original** tool: they don't include anything under [What this fork adds](#what-this-fork-adds).
 
 ## Install
 
@@ -10,15 +10,15 @@ Requires Python 3.11+. Plugin-state transplant needs macOS (see [below](#what-th
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install git+https://github.com/biogin/logic2ableton.git
+pip install git+https://github.com/biogin/logic2live.git
 ```
 
-This installs under the same package name as the original. If you already have the PyPI version, run `pip uninstall logic2ableton` first or use a fresh virtualenv as shown above. To confirm which one you have, run `pip freeze | grep logic2ableton`. It should show `git+https://github.com/biogin/logic2ableton`.
+Don't install it into the same environment as the original `logic2ableton` package: both ship a Python module of the same name and would overwrite each other. A fresh virtualenv, as shown above, avoids that.
 
 ## Use
 
 ```bash
-logic2ableton "MySong.logicx" --output ./output
+logic2live "MySong.logicx" --output ./output
 ```
 
 Open `output/MySong Project/MySong.als` in Live, then read `output/MySong_conversion_report.txt`: it lists every plugin instance and whether its state carried over, and for each track it explains why it was muted, if it was.
@@ -60,7 +60,7 @@ Methodology and exact tolerances: [docs/conversion-fidelity-details.md](docs/con
 | `--timeline` | Supply your own tempo map and/or markers as JSON |
 | `--template` | Use a specific `DefaultLiveSet.als` |
 
-Run `logic2ableton --help` for everything. Less common flows (SMPTE-synced live shows, mixer JSON, JSON progress output) are in [docs/cli-recipes.md](docs/cli-recipes.md).
+Run `logic2live --help` for everything. Less common flows (SMPTE-synced live shows, mixer JSON, JSON progress output) are in [docs/cli-recipes.md](docs/cli-recipes.md).
 
 ## Output
 

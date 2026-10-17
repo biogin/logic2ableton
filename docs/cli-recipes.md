@@ -5,26 +5,26 @@ Less common flows, pulled out of the README's Quick Start so that one stays shor
 Logic to Ableton for a SMPTE-synced live show: infer the timecode hour, keep the sync and pilot tracks from stretching, and apply a tempo map with markers:
 
 ```bash
-logic2ableton "Song.logicx" --output ./out --smpte-start auto --keep-unwarped "LTC*" --keep-unwarped "Pilot*" --timeline timeline.json
+logic2live "Song.logicx" --output ./out --smpte-start auto --keep-unwarped "LTC*" --keep-unwarped "Pilot*" --timeline timeline.json
 ```
 
 Write the mixer read from a Logic project to a JSON file you can edit, then convert with your edited values (tracks and fields you leave out keep what Logic has):
 
 ```bash
-logic2ableton "MySong.logicx" --output ./output --generate-mixer-template --report-only
-logic2ableton "MySong.logicx" --output ./output --mixer ./output/mixer_overrides.json
+logic2live "MySong.logicx" --output ./output --generate-mixer-template --report-only
+logic2live "MySong.logicx" --output ./output --mixer ./output/mixer_overrides.json
 ```
 
 Keep the interface outputs of a playback rig, so a click on outputs 11-12 in Logic is on Ext. Out 11/12 in Live:
 
 ```bash
-logic2ableton "MySong.logicx" --output ./output --keep-outputs
+logic2live "MySong.logicx" --output ./output --keep-outputs
 ```
 
 Emit JSON progress for app or automation integration:
 
 ```bash
-logic2ableton "MySong.logicx" --output ./output --json-progress
+logic2live "MySong.logicx" --output ./output --json-progress
 ableton2logic "MySet.als" --output ./output --json-progress
 ```
 
