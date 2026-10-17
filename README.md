@@ -1,166 +1,88 @@
-# logic2ableton
+# logic2ableton (plugin-state fork)
 
-[![PyPI version](https://img.shields.io/pypi/v/logic2ableton)](https://pypi.org/project/logic2ableton/)
-[![Python 3.11+](https://img.shields.io/pypi/pyversions/logic2ableton)](https://pypi.org/project/logic2ableton/)
-[![License: MIT](https://img.shields.io/pypi/l/logic2ableton)](https://github.com/Evilander/logic2ableton/blob/master/LICENSE)
+**Move a Logic Pro project into Ableton Live without re-dialing every plugin.** Your third-party plugins open in Live with the exact settings you left them at in Logic — not factory defaults — alongside your audio, MIDI, tempo, mixer, and volume/pan automation.
 
-**Convert a Logic Pro project into a real, working Ableton Live set.** Reads Logic's undocumented `.logicx` format and rebuilds your project in Live: audio on the timeline, note-accurate MIDI, tempo, mixer settings, and real third-party plugin state.
-
-```bash
-pip install logic2ableton
-logic2ableton "MySong.logicx" --output ./output
-```
-
-No Logic or Ableton installation needed to run the converter. Prefer a GUI? Grab the [desktop app](https://github.com/Evilander/logic2ableton/releases/latest) — drag a session file in, pick a destination, go.
-
-The same install also ships Ableton↔Logic↔Pro Tools conversion in the other directions, documented further down — but Logic → Ableton is the primary focus here.
-
-> Logic's and Pro Tools' session formats are undocumented and had to be reverse-engineered: [how Logic's MIDI was decoded →](docs/reverse-engineering-logic-pro-midi.md) · [how Pro Tools' session container was decoded →](docs/reverse-engineering-pro-tools-sessions.md)
-
-## What makes Logic → Ableton different
-
-Every paid cross-DAW converter we could find (AATranslator, Jukeblocks, WG DAW Converter) explicitly does not carry plugin state across — you reload and reconfigure every plugin by hand. This one transplants a third-party Audio Unit's exact saved state, byte-for-byte, whenever that plugin is installed on the machine opening the set. Verified in real Ableton Live 12 with FabFilter, iZotope, Xfer, and JUCE-based plugins.
-
-It's not everything — see [known gaps](#logic--ableton-what-works--known-gaps) below, especially Logic's own stock instruments.
-
-## Logic → Ableton: what works / known gaps
-
-Every run writes a report explaining exactly what transferred, what needs a manual check, and why — read it first if anything looks off.
-
-**Works**: audio + MIDI on the timeline, tempo/time signature, track colors and markers, mixer (level/pan/mute/bus groups), volume & pan automation, third-party AU plugin state byte-for-byte, and honest fallbacks — a track is auto-muted rather than left silently broken when its instrument can't transplant.
-
-**Known gaps**: Logic's own stock instruments (ES2, Alchemy, Drummer, ...) aren't identified yet — the track is auto-muted, but the report can't say which instrument is missing; sends and aux-only buses; fades/crossfades/region gain; plugin-parameter and mute automation; master/VCA faders.
-
-**→ Full validation methodology and exact tolerances:** [docs/conversion-fidelity-details.md](docs/conversion-fidelity-details.md)
-
-## Other directions (same install)
-
-The package also ships five other conversion directions, each with its own report:
-
-| Command | Input → Output |
-| --- | --- |
-| `ableton2logic` | Ableton `.als` → Logic import package (stems, MIDI, timeline) |
-| `protools2ableton` | Pro Tools `.ptx` → Ableton `.als` + MIDI |
-| `protools2logic` | Pro Tools `.ptx` → Logic import package |
-| `ableton2protools` | Ableton `.als` → Pro Tools import package |
-| `logic2protools` | Logic `.logicx` → Pro Tools import package |
-
-`logic2ableton` also auto-detects `.als` and `.ptx` input. None of these recreate plugin state or devices — they move audio, MIDI, and timeline metadata, and Pro Tools' tempo is assumed (120 BPM default, pass `--tempo`) since `.ptx` doesn't expose it. Full detail: [docs/conversion-fidelity-details.md](docs/conversion-fidelity-details.md).
+> This is a fork of [Evilander/logic2ableton](https://github.com/Evilander/logic2ableton) focused on Logic → Ableton fidelity. The `logic2ableton` package on PyPI and the upstream desktop app are the **original** tool and do **not** include anything listed under [What this fork adds](#what-this-fork-adds). Install from this repo to get them.
 
 ## Install
 
-| Method | Command / Link | Description |
-|--------|----------------|-------------|
-| **PyPI** | `pip install logic2ableton` | CLI tool, any platform with Python 3.11+ |
-| Windows | [Installer / Portable](https://github.com/Evilander/logic2ableton/releases/latest) | Desktop app |
-| macOS (Apple Silicon) | [DMG](https://github.com/Evilander/logic2ableton/releases/latest) | Desktop app, macOS 12+ (separate DMG for macOS 11) |
+Requires Python 3.11+. Plugin-state transplant needs macOS (see [below](#what-this-fork-adds)).
 
-Desktop app notes:
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install git+https://github.com/biogin/logic2ableton.git
+```
 
-- macOS builds are ad-hoc signed, not notarized — Gatekeeper quarantines them on first download. Fix once: `xattr -dr com.apple.quarantine "/Applications/Logic Ableton Transfer.app"`, or right-click the app and choose **Open**.
-- Intel macOS needs a source build; release DMGs are Apple Silicon only.
-- The app bundles the converter binary, so end users don't need Python installed.
+This installs under the same package name as the original. If you already have the PyPI version, run `pip uninstall logic2ableton` first or use a fresh virtualenv as shown above. To confirm which one you have, run `pip freeze | grep logic2ableton`. It should show `git+https://github.com/biogin/logic2ableton`.
 
-## Quick Start
-
-**Desktop**: launch the app, drop a session file (`.logicx`, `.als`, `.ptx`) in, pick the destination DAW, run, check the report if anything looks off.
-
-**CLI**:
+## Use
 
 ```bash
 logic2ableton "MySong.logicx" --output ./output
 ```
 
-Batch convert: pass multiple paths — `logic2ableton "Song1.logicx" "Song2.logicx" --output ./output`.
+Open `output/MySong Project/MySong.als` in Live, then read `output/MySong_conversion_report.txt`: it lists every plugin instance and whether its state carried over, and for each track it explains why it was muted, if it was.
 
-The other five directions use the same pattern with their own command (`ableton2logic`, `protools2ableton`, `protools2logic`, `ableton2protools`, `logic2protools` — see [Other directions](#other-directions-same-install) above); `logic2ableton` itself also auto-detects `.als` and `.ptx` input.
+Add `--report-only` to see the report without writing a project. Pass several `.logicx` paths to batch-convert.
 
-Preview without writing output: add `--report-only`.
+## What this fork adds
 
-Less common flows (SMPTE-synced live shows, mixer override JSON, `--keep-outputs`, JSON progress for automation, the timeline JSON format) are in **[docs/cli-recipes.md](docs/cli-recipes.md)**.
+Every paid cross-DAW converter we've found (AATranslator, Jukeblocks, WG DAW Converter) makes you reload and reconfigure every plugin by hand. This fork doesn't:
 
-## CLI Options
+- **Plugin state transplant.** A third-party Audio Unit's saved state is copied into the Live set byte-for-byte and placed on the right track at the right position in the insert chain. Verified in Ableton Live 12 with FabFilter, iZotope, Xfer, and JUCE-based plugins (e.g. soothe2). This works for any plugin installed on the Mac you run the conversion on, and it will load wherever that same plugin is installed.
+- **Volume and pan automation** carried over from Logic.
+- **Fallbacks you can see.** If a track's instrument can't be transplanted, the track is muted in Live instead of failing silently, and its MIDI is kept untouched. Logic's own stock instruments (ES2, Alchemy, Sampler, ...) are detected the same way. If an effect can't be transplanted, it's dropped, and the report names it and confirms the rest of the chain is intact.
+- **A per-plugin report.** For every plugin instance it says *transplanted* or *fell back*, plus the reason: plugin not installed / not an AU, or no Audio Unit support on this platform.
 
-Every lane's input argument accepts one or more paths; pass several to convert each in turn.
+**Platform:** transplant needs macOS. On Windows the conversion still runs, but every third-party plugin falls back to the original tool's VST3 suggestions only.
 
-### Shared
+## What carries over
 
-| Option | Description |
+**Carries over:** audio and note-accurate MIDI on the timeline, tempo and time-signature changes, track colors, markers, the mixer (level, pan, mute, bus groups), volume and pan automation, third-party AU plugin state.
+
+**Doesn't yet:** Logic's stock instruments and effects aren't converted to Live equivalents. Tracks using a stock instrument are auto-muted, but the report can't name the instrument. Also not yet: sends and aux-only buses, fades/crossfades/region gain, plugin-parameter and mute automation, master/VCA faders.
+
+Methodology and exact tolerances: [docs/conversion-fidelity-details.md](docs/conversion-fidelity-details.md). How Logic's undocumented format was decoded: [docs/reverse-engineering-logic-pro-midi.md](docs/reverse-engineering-logic-pro-midi.md).
+
+## Useful options
+
+| Option | What it does |
 | --- | --- |
-| `--version`, `-V` | Show version |
-| `--mode` | Force any of the six lane names |
 | `--output`, `-o` | Output directory |
-| `--report-only` | Write the transfer report without generating output files |
-| `--no-copy` | Don't copy audio; generated output references the original files |
-| `--json-progress` | Emit JSON progress lines for GUI or automation use |
-
-### Logic to Ableton only
-
-| Option | Description |
-| --- | --- |
-| `--alternative`, `-a` | Logic alternative index (also on `logic2protools`) |
-| `--template` | Use a specific `DefaultLiveSet.als` (also on `protools2ableton`) |
-| `--vst3-path` | Override the VST3 scan directory |
-| `--mixer` | JSON file of level/pan/mute/solo per track, overriding what Logic has |
-| `--no-mixer` | Leave every track at 0 dB, centred and unmuted, with no groups |
+| `--report-only` | Write the report only, no project |
+| `--alternative`, `-a` | Which Logic project alternative to convert |
+| `--no-copy` | Reference the original audio files instead of copying them |
+| `--mixer` / `--no-mixer` | Override mixer values from a JSON file / reset every track to 0 dB, centred, unmuted |
 | `--generate-mixer-template` | Write `mixer_overrides.json` with the values read from Logic |
-| `--keep-outputs` | Route tracks that play to another interface output in Logic to the same output in Live |
-| `--smpte-start` | SMPTE time bar 1 plays at (default `01:00:00:00`; `auto` infers one) |
-| `--keep-unwarped` | Track-name glob (repeatable); matching tracks are written unwarped |
-| `--timeline` | JSON file with a tempo map and/or markers, in place of the project's own (see [cli-recipes.md](docs/cli-recipes.md)) |
+| `--keep-outputs` | Keep tracks routed to other interface outputs on the same outputs in Live |
+| `--smpte-start` | SMPTE time at bar 1 (default `01:00:00:00`, or `auto`) |
+| `--keep-unwarped` | Track-name glob (repeatable) for tracks to leave unwarped, e.g. sync/timecode |
+| `--timeline` | Supply your own tempo map and/or markers as JSON |
+| `--template` | Use a specific `DefaultLiveSet.als` |
 
-### Pro Tools imports only
+Run `logic2ableton --help` for everything. Less common flows (SMPTE-synced live shows, mixer JSON, JSON progress output) are in [docs/cli-recipes.md](docs/cli-recipes.md).
 
-| Option | Description |
-| --- | --- |
-| `--tempo` | Tempo (BPM) used to convert sample positions to beats; `.ptx` doesn't expose its tempo yet (default 120) |
-
-## Output Layout
-
-Each conversion creates a fresh project or transfer folder; a name collision gets a `(2)` suffix.
+## Output
 
 ```text
 output/
   MySong Project/
-    MySong.als              <- Logic/Pro Tools -> Ableton
+    MySong.als
     Samples/Imported/
     MIDI/01 - MIDI 1.mid
   MySong_conversion_report.txt
 ```
 
-```text
-output/
-  MySet Logic Transfer/      <- Ableton -> Logic
-    Track Stems/
-    Logic Timeline/Logic Timeline.mid
-    MIDI Tracks/
-    Audio Files/
-    timeline_manifest.json / .csv
-    locators.csv
-    IMPORT_TO_LOGIC.md
-```
+A name collision gets a `(2)` suffix — nothing is overwritten.
 
-```text
-output/
-  MySet Pro Tools Transfer/  <- Ableton/Logic -> Pro Tools
-    Audio Files/             (BWF TimeReference stamped for Spot > Original Time Stamp)
-    MIDI/
-    manifest.json
-    IMPORT GUIDE.txt
-```
+## Inherited from the original tool
 
-## Reading The Reports
-
-Every Logic to Ableton report opens with the SMPTE start it used and whether it found the project's audio in a package or folder-style layout. Pay close attention to `COMPATIBILITY WARNINGS` — they mean either the converter needs an improvement, or the source session needs manual cleanup or a more deliberate export/import path.
+The install also includes the original tool's other conversion directions, **unchanged by this fork**: `ableton2logic`, `protools2ableton`, `protools2logic`, `ableton2protools`, `logic2protools`. They move audio, MIDI and timeline data but no plugin state or devices. They're documented in the [upstream README](https://github.com/Evilander/logic2ableton#readme), and bugs in them belong [upstream](https://github.com/Evilander/logic2ableton/issues).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for running tests, building the desktop app, and the release process.
-
-## Bug Reports
-
-Open issues at https://github.com/Evilander/logic2ableton/issues with: the Logic/Ableton version used to save the project, the exact generated report, and a minimal failing project if one can be shared.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for running tests.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Original work © 2025 evilander; fork changes by biogin.
